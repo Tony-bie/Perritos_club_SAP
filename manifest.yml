@@ -1,0 +1,5 @@
+applications:
+  - name: Perritos-backend
+    memory: 256M
+    buildpacks:
+      - nodejs_buildpack

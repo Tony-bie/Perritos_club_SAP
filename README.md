@@ -258,13 +258,59 @@ Optional:
 ```
 project/
 ├── main.py
+├── config.py
 ├── client.py
 ├── ingest.py
 ├── normalize.py
 ├── detect.py
 ├── alert.py
-└── store.py
+├── store.py
+├── requirements.txt
+├── requirements-hana.txt
+└── .env.example
 ```
+
+---
+
+## Backend Base (Implemented)
+
+The backend scaffold is now available with:
+
+* FastAPI service endpoints
+* SAP SOC ingestion client (`/info` + paginated `/logs/current?page=N`)
+* Normalization flags (`is_llm_log`, `is_system_log`)
+* MVP detection rule (ERROR/SECURITY spike by `client_ip`)
+* Storage layer with SQLite local mode and SAP HANA mode
+
+### Local Run (Windows PowerShell)
+
+```powershell
+cd C:\Users\Lenovo\Perritos_club_SAP
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+Copy-Item .env.example .env
+python main.py
+```
+
+Service default URL:
+
+```text
+http://localhost:8000
+```
+
+### API Endpoints (Backend Service)
+
+| Endpoint | Purpose |
+| --- | --- |
+| `/health` | Local service health |
+| `/health/sap` | SAP SOC `/health` passthrough |
+| `/run/ingestion` | Trigger one full ingestion cycle now |
+| `/status/latest` | Get the latest ingestion run summary |
+
+### Storage Modes
+
+* `STORAGE_BACKEND=sqlite` (default local development)
+* `STORAGE_BACKEND=hana` (install `requirements-hana.txt` and configure HANA env vars)
 
 ---
 
