@@ -1,27 +1,30 @@
-import os
-import requests
-import pandas as pd
-from dotenv import load_dotenv
+from __future__ import annotations
 
-load_dotenv()
+import sys
 
-BASE_URL = os.getenv("SAP_SOC_BASE_URL")
-TOKEN = os.getenv("SAP_SOC_TOKEN")
+from soc_pipeline.application.pipeline import run_once, run_poll
+from soc_pipeline.application.training import run_training
+from soc_pipeline.infrastructure.config import build_parser, load_runtime_config
 
 
-HEADERS = {"Authorization": f"Bearer {TOKEN}"}
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
 
-# Fetch first page
-r = requests.get(f"{BASE_URL}/logs/current", headers=HEADERS, params={"page": 1})
-payload = r.json()
+    try:
+        config = load_runtime_config(args)
+        if args.command == "poll":
+            return run_poll(config=config, force=args.force)
+        if args.command == "train":
+            return run_training(config=config)
+        return run_once(config=config, force=args.force)
+    except KeyboardInterrupt:
+        print("Execution interrupted.")
+        return 1
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
 
-records = payload["data"]
 
-# Fetch remaining pages
-for page in range(2, payload["total_pages"] + 1):
-    r = requests.get(f"{BASE_URL}/logs/current", headers=HEADERS, params={"page": page})
-    records.extend(r.json()["data"])
-
-# Convert to DataFrame
-df = pd.DataFrame(records)
-print(df.head())
+if __name__ == "__main__":
+    raise SystemExit(main())

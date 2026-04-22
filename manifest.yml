@@ -1,0 +1,10 @@
+---
+applications:
+  - name: sap-soc-pipeline
+    memory: 512M
+    instances: 1
+    buildpacks:
+      - python_buildpack
+    command: gunicorn --bind 0.0.0.0:${PORT} foundry_app:app
+    env:
+      PYTHONUNBUFFERED: "true"

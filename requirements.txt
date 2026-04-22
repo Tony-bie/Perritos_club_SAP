@@ -1,0 +1,7 @@
+requests>=2.31.0
+pandas>=2.0.0
+python-dotenv>=1.0.0
+hdbcli>=2.20.0
+hana-ml>=2.26.0
+Flask>=3.0.0
+gunicorn>=22.0.0
