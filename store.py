@@ -204,8 +204,8 @@ class HanaStore(BaseStore):
             port=self.settings.hana_port,
             user=self.settings.hana_user,
             password=self.settings.hana_password,
-            encrypt="true",
-            sslValidateCertificate="true",
+            encrypt=self.settings.hana_encrypt,
+            sslValidateCertificate=self.settings.hana_validate_certificate,
         )
 
     def ensure_schema(self) -> None:

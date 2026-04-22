@@ -28,6 +28,8 @@ class Settings:
     hana_user: str
     hana_password: str
     hana_schema: str
+    hana_encrypt: bool
+    hana_validate_certificate: bool
     error_security_threshold: int
 
 
@@ -55,5 +57,10 @@ def load_settings() -> Settings:
         hana_user=os.getenv("HANA_USER", ""),
         hana_password=os.getenv("HANA_PASSWORD", ""),
         hana_schema=os.getenv("HANA_SCHEMA", "SOC_PIPELINE"),
+        hana_encrypt=_to_bool(os.getenv("HANA_ENCRYPT", "true"), True),
+        hana_validate_certificate=_to_bool(
+            os.getenv("HANA_VALIDATE_CERTIFICATE", "false"),
+            False,
+        ),
         error_security_threshold=int(os.getenv("ERROR_SECURITY_THRESHOLD", "25")),
     )

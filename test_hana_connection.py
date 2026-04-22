@@ -22,7 +22,17 @@ def main() -> int:
         print("Faltan variables HANA_HOST o HANA_USER en el entorno. Edita .env o exporta las variables.")
         return 2
 
-    print("HANA settings:", {"host": host, "port": port, "user": user, "schema": schema})
+    print(
+        "HANA settings:",
+        {
+            "host": host,
+            "port": port,
+            "user": user,
+            "schema": schema,
+            "encrypt": settings.hana_encrypt,
+            "validate_certificate": settings.hana_validate_certificate,
+        },
+    )
 
     try:
         from hdbcli import dbapi  # type: ignore
@@ -39,8 +49,8 @@ def main() -> int:
             port=port,
             user=user,
             password=settings.hana_password,
-            encrypt="true",
-            sslValidateCertificate="true",
+            encrypt=settings.hana_encrypt,
+            sslValidateCertificate=settings.hana_validate_certificate,
         )
         cursor = conn.cursor()
         cursor.execute("SELECT CURRENT_UTCTIMESTAMP FROM DUMMY")
