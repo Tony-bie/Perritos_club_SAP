@@ -6,7 +6,8 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from config import Settings
+from backend.core.config import Settings
+from backend.services.ingestion.features import NUMERIC_FEATURE_COLUMNS
 
 
 class BaseStore(ABC):
@@ -28,6 +29,18 @@ class BaseStore(ABC):
 
     @abstractmethod
     def get_last_run(self) -> Optional[Dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def upsert_window_metrics(self, metrics: Dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_recent_window_metrics(self, limit: int = 200) -> List[Dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_latest_window_metrics(self) -> Optional[Dict[str, Any]]:
         raise NotImplementedError
 
 
@@ -84,8 +97,36 @@ class SqliteStore(BaseStore):
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS window_metrics (
+                    window_key TEXT PRIMARY KEY,
+                    window_start TEXT,
+                    window_end TEXT,
+                    total_records INTEGER NOT NULL,
+                    threat_score INTEGER NOT NULL,
+                    attack_predicted INTEGER NOT NULL,
+                    model_available INTEGER NOT NULL,
+                    is_anomaly INTEGER NOT NULL,
+                    anomaly_score REAL NOT NULL,
+                    anomaly_percentile REAL NOT NULL,
+                    summary_json TEXT NOT NULL,
+                    saved_at_utc TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS window_features (
+                    window_key TEXT PRIMARY KEY,
+                    {", ".join(f"{column} REAL NOT NULL" for column in NUMERIC_FEATURE_COLUMNS)},
+                    saved_at_utc TEXT NOT NULL
+                )
+                """
+            )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_logs_log_ts ON raw_logs(log_ts)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_started ON ingest_runs(started_at_utc)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_window_metrics_saved ON window_metrics(saved_at_utc)")
             conn.commit()
 
     def upsert_raw_logs(self, records: List[Dict[str, Any]]) -> int:
@@ -181,6 +222,63 @@ class SqliteStore(BaseStore):
             ).fetchone()
         return dict(row) if row else None
 
+    def upsert_window_metrics(self, metrics: Dict[str, Any]) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO window_metrics
+                (window_key, window_start, window_end, total_records, threat_score, attack_predicted,
+                 model_available, is_anomaly, anomaly_score, anomaly_percentile, summary_json, saved_at_utc)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    metrics.get("window_key"),
+                    metrics.get("window_start"),
+                    metrics.get("window_end"),
+                    int(metrics.get("total_records", 0)),
+                    int(metrics.get("threat_score", 0)),
+                    int(bool(metrics.get("attack_predicted", False))),
+                    int(bool(metrics.get("model_available", False))),
+                    int(bool(metrics.get("is_anomaly", False))),
+                    float(metrics.get("anomaly_score", 0.0)),
+                    float(metrics.get("anomaly_percentile", 0.0)),
+                    json.dumps(metrics, ensure_ascii=True),
+                    metrics.get("saved_at_utc") or datetime.utcnow().isoformat(),
+                ),
+            )
+            feature_columns = ", ".join(NUMERIC_FEATURE_COLUMNS)
+            feature_placeholders = ", ".join("?" for _ in NUMERIC_FEATURE_COLUMNS)
+            conn.execute(
+                f"""
+                INSERT OR REPLACE INTO window_features
+                (window_key, {feature_columns}, saved_at_utc)
+                VALUES (?, {feature_placeholders}, ?)
+                """,
+                (
+                    metrics.get("window_key"),
+                    *[float(metrics.get(column, 0.0) or 0.0) for column in NUMERIC_FEATURE_COLUMNS],
+                    metrics.get("saved_at_utc") or datetime.utcnow().isoformat(),
+                ),
+            )
+            conn.commit()
+
+    def get_recent_window_metrics(self, limit: int = 200) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT summary_json
+                FROM window_metrics
+                ORDER BY saved_at_utc DESC
+                LIMIT ?
+                """,
+                (int(limit),),
+            ).fetchall()
+        return [json.loads(row["summary_json"]) for row in rows]
+
+    def get_latest_window_metrics(self) -> Optional[Dict[str, Any]]:
+        results = self.get_recent_window_metrics(limit=1)
+        return results[0] if results else None
+
     @staticmethod
     def _fallback_id(record: Dict[str, Any]) -> str:
         payload = json.dumps(record, sort_keys=True, ensure_ascii=True)
@@ -252,6 +350,53 @@ class HanaStore(BaseStore):
                     ALERT_TYPE NVARCHAR(128),
                     SEVERITY NVARCHAR(16),
                     PAYLOAD NCLOB
+                )
+                ''',
+                f'''
+                CREATE COLUMN TABLE "{schema}"."WINDOW_METRICS" (
+                    WINDOW_KEY NVARCHAR(128) PRIMARY KEY,
+                    WINDOW_START NVARCHAR(64),
+                    WINDOW_END NVARCHAR(64),
+                    TOTAL_RECORDS INTEGER,
+                    THREAT_SCORE INTEGER,
+                    ATTACK_PREDICTED TINYINT,
+                    MODEL_AVAILABLE TINYINT,
+                    IS_ANOMALY TINYINT,
+                    ANOMALY_SCORE DOUBLE,
+                    ANOMALY_PERCENTILE DOUBLE,
+                    SUMMARY_JSON NCLOB,
+                    SAVED_AT_UTC NVARCHAR(64)
+                )
+                ''',
+                f'''
+                CREATE COLUMN TABLE "{schema}"."WINDOW_FEATURES" (
+                    WINDOW_KEY NVARCHAR(128) PRIMARY KEY,
+                    TOTAL_RECORDS DOUBLE,
+                    SYSTEM_LOG_COUNT DOUBLE,
+                    LLM_LOG_COUNT DOUBLE,
+                    ERROR_COUNT DOUBLE,
+                    SECURITY_COUNT DOUBLE,
+                    WARNING_COUNT DOUBLE,
+                    AUDIT_COUNT DOUBLE,
+                    DEBUG_COUNT DOUBLE,
+                    PERF_COUNT DOUBLE,
+                    HTTP_4XX_COUNT DOUBLE,
+                    HTTP_5XX_COUNT DOUBLE,
+                    UNIQUE_CLIENT_IPS DOUBLE,
+                    UNIQUE_SERVICES DOUBLE,
+                    MAX_EVENTS_FROM_SINGLE_IP DOUBLE,
+                    LLM_REQUEST_COUNT DOUBLE,
+                    LLM_ERROR_COUNT DOUBLE,
+                    LLM_TIMEOUT_COUNT DOUBLE,
+                    AVG_LLM_LATENCY_MS DOUBLE,
+                    P95_LLM_LATENCY_MS DOUBLE,
+                    TOTAL_LLM_COST_USD DOUBLE,
+                    SYSTEM_ERROR_RATE DOUBLE,
+                    SECURITY_EVENT_RATE DOUBLE,
+                    LLM_ERROR_RATE DOUBLE,
+                    LLM_TIMEOUT_RATE DOUBLE,
+                    TOP_IP_EVENT_SHARE DOUBLE,
+                    SAVED_AT_UTC NVARCHAR(64)
                 )
                 ''',
             ]
@@ -385,6 +530,74 @@ class HanaStore(BaseStore):
                 "error_message",
             ]
             return dict(zip(keys, row))
+
+    def upsert_window_metrics(self, metrics: Dict[str, Any]) -> None:
+        schema = self.settings.hana_schema
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            statement = (
+                f'UPSERT "{schema}"."WINDOW_METRICS" '
+                '(WINDOW_KEY, WINDOW_START, WINDOW_END, TOTAL_RECORDS, THREAT_SCORE, ATTACK_PREDICTED, '
+                'MODEL_AVAILABLE, IS_ANOMALY, ANOMALY_SCORE, ANOMALY_PERCENTILE, SUMMARY_JSON, SAVED_AT_UTC) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) WITH PRIMARY KEY'
+            )
+            cursor.execute(
+                statement,
+                (
+                    metrics.get("window_key"),
+                    metrics.get("window_start"),
+                    metrics.get("window_end"),
+                    int(metrics.get("total_records", 0)),
+                    int(metrics.get("threat_score", 0)),
+                    int(bool(metrics.get("attack_predicted", False))),
+                    int(bool(metrics.get("model_available", False))),
+                    int(bool(metrics.get("is_anomaly", False))),
+                    float(metrics.get("anomaly_score", 0.0)),
+                    float(metrics.get("anomaly_percentile", 0.0)),
+                    json.dumps(metrics, ensure_ascii=True),
+                    metrics.get("saved_at_utc") or datetime.utcnow().isoformat(),
+                ),
+            )
+            feature_statement = (
+                f'UPSERT "{schema}"."WINDOW_FEATURES" '
+                '('
+                'WINDOW_KEY, TOTAL_RECORDS, SYSTEM_LOG_COUNT, LLM_LOG_COUNT, ERROR_COUNT, SECURITY_COUNT, '
+                'WARNING_COUNT, AUDIT_COUNT, DEBUG_COUNT, PERF_COUNT, HTTP_4XX_COUNT, HTTP_5XX_COUNT, '
+                'UNIQUE_CLIENT_IPS, UNIQUE_SERVICES, MAX_EVENTS_FROM_SINGLE_IP, LLM_REQUEST_COUNT, '
+                'LLM_ERROR_COUNT, LLM_TIMEOUT_COUNT, AVG_LLM_LATENCY_MS, P95_LLM_LATENCY_MS, TOTAL_LLM_COST_USD, '
+                'SYSTEM_ERROR_RATE, SECURITY_EVENT_RATE, LLM_ERROR_RATE, LLM_TIMEOUT_RATE, TOP_IP_EVENT_SHARE, '
+                'SAVED_AT_UTC'
+                ') VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) '
+                'WITH PRIMARY KEY'
+            )
+            cursor.execute(
+                feature_statement,
+                (
+                    metrics.get("window_key"),
+                    *[float(metrics.get(column, 0.0) or 0.0) for column in NUMERIC_FEATURE_COLUMNS],
+                    metrics.get("saved_at_utc") or datetime.utcnow().isoformat(),
+                ),
+            )
+            conn.commit()
+
+    def get_recent_window_metrics(self, limit: int = 200) -> List[Dict[str, Any]]:
+        schema = self.settings.hana_schema
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f'''
+                SELECT SUMMARY_JSON
+                FROM "{schema}"."WINDOW_METRICS"
+                ORDER BY SAVED_AT_UTC DESC
+                LIMIT {int(limit)}
+                '''
+            )
+            rows = cursor.fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    def get_latest_window_metrics(self) -> Optional[Dict[str, Any]]:
+        results = self.get_recent_window_metrics(limit=1)
+        return results[0] if results else None
 
 
 def create_store(settings: Settings) -> BaseStore:

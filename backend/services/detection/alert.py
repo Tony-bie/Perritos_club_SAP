@@ -17,7 +17,7 @@ def format_alert_events(raw_alerts: List[Dict[str, Any]], run_id: str) -> List[D
                 "detected_at_utc": now,
                 "alert_type": alert.get("alert_type", "UNKNOWN"),
                 "severity": alert.get("severity", "medium"),
-                "payload": alert,
+                "payload": dict(alert),
             }
         )
 

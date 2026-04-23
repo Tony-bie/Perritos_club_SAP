@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
-from client import SAPSOCClient
+from backend.services.clients.sap_soc import SAPSOCClient
 
 
 @dataclass

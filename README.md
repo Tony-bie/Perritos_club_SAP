@@ -257,14 +257,32 @@ Optional:
 
 ```
 project/
+├── backend/
+│   ├── api/
+│   │   └── http/
+│   │       └── application.py
+│   ├── core/
+│   │   └── config.py
+│   ├── services/
+│   │   ├── clients/
+│   │   │   └── sap_soc.py
+│   │   ├── detection/
+│   │   │   ├── alert.py
+│   │   │   ├── detect.py
+│   │   │   └── model.py
+│   │   └── ingestion/
+│   │       ├── features.py
+│   │       ├── ingest.py
+│   │       └── normalize.py
+│   └── storage/
+│       └── backends/
+│           └── store.py
+├── docs/
+│   └── HANA_CONNECTION.md
+├── scripts/
+│   └── test_hana_connection.py
 ├── main.py
-├── config.py
-├── client.py
-├── ingest.py
-├── normalize.py
-├── detect.py
-├── alert.py
-├── store.py
+├── test_hana_connection.py
 ├── requirements.txt
 ├── requirements-hana.txt
 └── .env.example
