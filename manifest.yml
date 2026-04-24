@@ -7,3 +7,5 @@ applications:
     command: python -m uvicorn main:app --host 0.0.0.0 --port $PORT
     env:
       PYTHONUNBUFFERED: "true"
+      ENABLE_WORKER: "true"
+      POLL_INTERVAL_MINUTES: "5"

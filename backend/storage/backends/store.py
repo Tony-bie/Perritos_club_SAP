@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import sqlite3
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from backend.core.config import Settings
 from backend.services.ingestion.features import NUMERIC_FEATURE_COLUMNS
@@ -306,9 +307,27 @@ class HanaStore(BaseStore):
             sslValidateCertificate=self.settings.hana_validate_certificate,
         )
 
+    @contextmanager
+    def _connection(self) -> Iterator[Any]:
+        conn = self._connect()
+        try:
+            yield conn
+        except Exception:
+            rollback = getattr(conn, "rollback", None)
+            if callable(rollback):
+                try:
+                    rollback()
+                except Exception:
+                    pass
+            raise
+        finally:
+            close = getattr(conn, "close", None)
+            if callable(close):
+                close()
+
     def ensure_schema(self) -> None:
         schema = self.settings.hana_schema
-        with self._connect() as conn:
+        with self._connection() as conn:
             cursor = conn.cursor()
             try:
                 cursor.execute(f'CREATE SCHEMA "{schema}"')
@@ -415,7 +434,7 @@ class HanaStore(BaseStore):
 
         schema = self.settings.hana_schema
         upserted = 0
-        with self._connect() as conn:
+        with self._connection() as conn:
             cursor = conn.cursor()
             statement = (
                 f'UPSERT "{schema}"."RAW_LOGS" '
@@ -441,7 +460,7 @@ class HanaStore(BaseStore):
 
     def insert_ingest_run(self, ingest_run: Dict[str, Any]) -> None:
         schema = self.settings.hana_schema
-        with self._connect() as conn:
+        with self._connection() as conn:
             cursor = conn.cursor()
             statement = (
                 f'UPSERT "{schema}"."INGEST_RUNS" '
@@ -475,7 +494,7 @@ class HanaStore(BaseStore):
 
         schema = self.settings.hana_schema
         inserted = 0
-        with self._connect() as conn:
+        with self._connection() as conn:
             cursor = conn.cursor()
             statement = (
                 f'UPSERT "{schema}"."ALERTS_EVENTS" '
@@ -500,7 +519,7 @@ class HanaStore(BaseStore):
 
     def get_last_run(self) -> Optional[Dict[str, Any]]:
         schema = self.settings.hana_schema
-        with self._connect() as conn:
+        with self._connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 f'''
@@ -533,7 +552,7 @@ class HanaStore(BaseStore):
 
     def upsert_window_metrics(self, metrics: Dict[str, Any]) -> None:
         schema = self.settings.hana_schema
-        with self._connect() as conn:
+        with self._connection() as conn:
             cursor = conn.cursor()
             statement = (
                 f'UPSERT "{schema}"."WINDOW_METRICS" '
@@ -582,7 +601,7 @@ class HanaStore(BaseStore):
 
     def get_recent_window_metrics(self, limit: int = 200) -> List[Dict[str, Any]]:
         schema = self.settings.hana_schema
-        with self._connect() as conn:
+        with self._connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 f'''

@@ -1,0 +1,12 @@
+.env
+.envrc
+.venv/
+venv/
+__pycache__/
+*.py[codz]
+.pytest_cache/
+pipeline.db
+*.db-shm
+*.db-wal
+data/
+node_modules/
