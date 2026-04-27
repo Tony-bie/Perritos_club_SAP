@@ -13,6 +13,7 @@ from backend.services.clients import SAPSOCClient
 from backend.services.detection import (
     evaluate_window_risk,
     format_alert_events,
+    score_historical_pattern,
     score_window_metrics,
     unavailable_model_signal,
 )
@@ -70,10 +71,24 @@ def execute_ingestion_cycle() -> Dict[str, Any]:
         window_end=ingest_result.window_end,
     )
     store.upsert_window_metrics(window_metrics)
+    current_window_key = str(window_metrics.get("window_key") or "")
+    history_rows = store.get_recent_window_features(limit=settings.model_history_limit)
+    history_rows = [
+        row
+        for row in history_rows
+        if str(row.get("window_key") or "") != current_window_key
+    ]
+
+    historical_signal = score_historical_pattern(
+        current_metrics=window_metrics,
+        history_rows=history_rows,
+        min_history_rows=max(20, settings.model_min_training_rows),
+    )
+
     model_signal = (
         score_window_metrics(
             settings=settings,
-            current_window_key=str(window_metrics.get("window_key") or ""),
+            current_window_key=current_window_key,
             min_training_rows=settings.model_min_training_rows,
             contamination=settings.model_contamination,
         )
@@ -84,6 +99,7 @@ def execute_ingestion_cycle() -> Dict[str, Any]:
         normalized_records=normalized,
         metrics=window_metrics,
         model_signal=model_signal,
+        historical_signal=historical_signal,
         count_threshold=settings.error_security_threshold,
         attack_score_threshold=settings.attack_score_threshold,
     )

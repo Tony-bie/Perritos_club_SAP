@@ -41,6 +41,10 @@ class BaseStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_recent_window_features(self, limit: int = 200) -> List[Dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
     def get_latest_window_metrics(self) -> Optional[Dict[str, Any]]:
         raise NotImplementedError
 
@@ -276,6 +280,20 @@ class SqliteStore(BaseStore):
             ).fetchall()
         return [json.loads(row["summary_json"]) for row in rows]
 
+    def get_recent_window_features(self, limit: int = 200) -> List[Dict[str, Any]]:
+        feature_columns = ", ".join(NUMERIC_FEATURE_COLUMNS)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT window_key, {feature_columns}, saved_at_utc
+                FROM window_features
+                ORDER BY saved_at_utc DESC
+                LIMIT ?
+                """,
+                (int(limit),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def get_latest_window_metrics(self) -> Optional[Dict[str, Any]]:
         results = self.get_recent_window_metrics(limit=1)
         return results[0] if results else None
@@ -401,8 +419,6 @@ class HanaStore(BaseStore):
                     PERF_COUNT DOUBLE,
                     HTTP_4XX_COUNT DOUBLE,
                     HTTP_5XX_COUNT DOUBLE,
-                    UNIQUE_CLIENT_IPS DOUBLE,
-                    UNIQUE_SERVICES DOUBLE,
                     MAX_EVENTS_FROM_SINGLE_IP DOUBLE,
                     LLM_REQUEST_COUNT DOUBLE,
                     LLM_ERROR_COUNT DOUBLE,
@@ -577,16 +593,13 @@ class HanaStore(BaseStore):
                     metrics.get("saved_at_utc") or datetime.utcnow().isoformat(),
                 ),
             )
+            feature_columns = [column.upper() for column in NUMERIC_FEATURE_COLUMNS]
+            feature_column_sql = ", ".join(feature_columns)
+            feature_placeholders = ", ".join("?" for _ in feature_columns)
             feature_statement = (
                 f'UPSERT "{schema}"."WINDOW_FEATURES" '
-                '('
-                'WINDOW_KEY, TOTAL_RECORDS, SYSTEM_LOG_COUNT, LLM_LOG_COUNT, ERROR_COUNT, SECURITY_COUNT, '
-                'WARNING_COUNT, AUDIT_COUNT, DEBUG_COUNT, PERF_COUNT, HTTP_4XX_COUNT, HTTP_5XX_COUNT, '
-                'UNIQUE_CLIENT_IPS, UNIQUE_SERVICES, MAX_EVENTS_FROM_SINGLE_IP, LLM_REQUEST_COUNT, '
-                'LLM_ERROR_COUNT, LLM_TIMEOUT_COUNT, AVG_LLM_LATENCY_MS, P95_LLM_LATENCY_MS, TOTAL_LLM_COST_USD, '
-                'SYSTEM_ERROR_RATE, SECURITY_EVENT_RATE, LLM_ERROR_RATE, LLM_TIMEOUT_RATE, TOP_IP_EVENT_SHARE, '
-                'SAVED_AT_UTC'
-                ') VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) '
+                f'(WINDOW_KEY, {feature_column_sql}, SAVED_AT_UTC) '
+                f'VALUES (?, {feature_placeholders}, ?) '
                 'WITH PRIMARY KEY'
             )
             cursor.execute(
@@ -613,6 +626,23 @@ class HanaStore(BaseStore):
             )
             rows = cursor.fetchall()
         return [json.loads(row[0]) for row in rows]
+
+    def get_recent_window_features(self, limit: int = 200) -> List[Dict[str, Any]]:
+        schema = self.settings.hana_schema
+        feature_columns = [column.upper() for column in NUMERIC_FEATURE_COLUMNS]
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f'''
+                SELECT WINDOW_KEY, {", ".join(feature_columns)}, SAVED_AT_UTC
+                FROM "{schema}"."WINDOW_FEATURES"
+                ORDER BY SAVED_AT_UTC DESC
+                LIMIT {int(limit)}
+                '''
+            )
+            rows = cursor.fetchall()
+            keys = [desc[0].lower() for desc in cursor.description]
+        return [dict(zip(keys, row)) for row in rows]
 
     def get_latest_window_metrics(self) -> Optional[Dict[str, Any]]:
         results = self.get_recent_window_metrics(limit=1)

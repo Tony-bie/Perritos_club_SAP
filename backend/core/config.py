@@ -225,11 +225,11 @@ def load_settings() -> Settings:
             25,
         ),
         attack_score_threshold=_to_int(
-            _getenv("ATTACK_SCORE_THRESHOLD", default="40"),
-            40,
+            _getenv("ATTACK_SCORE_THRESHOLD", default="70"),
+            70,
         ),
         model_enabled=_to_bool(_getenv("MODEL_ENABLED", default="true"), True),
-        model_min_training_rows=_to_int(_getenv("MODEL_MIN_TRAINING_ROWS", default="12"), 12),
+        model_min_training_rows=_to_int(_getenv("MODEL_MIN_TRAINING_ROWS", default="30"), 30),
         model_contamination=_to_float(_getenv("MODEL_CONTAMINATION", default="0.15"), 0.15),
         model_history_limit=_to_int(_getenv("MODEL_HISTORY_LIMIT", default="200"), 200),
     )
