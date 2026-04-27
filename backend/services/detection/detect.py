@@ -7,104 +7,99 @@ def evaluate_window_risk(
     normalized_records: List[Dict[str, Any]],
     metrics: Dict[str, Any],
     model_signal: Dict[str, Any],
+    historical_signal: Dict[str, Any],
     count_threshold: int = 25,
-    attack_score_threshold: int = 40,
+    attack_score_threshold: int = 70,
 ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    del count_threshold  # Kept for backward compatibility with older call sites.
+
     alerts: List[Dict[str, Any]] = []
 
-    if metrics.get("security_count", 0) >= count_threshold:
+    for signal in historical_signal.get("pattern_signals", []):
         alerts.append(
             _alert(
-                "security_event_spike",
-                "critical",
-                35,
+                f"historical_{signal.get('feature', 'unknown')}",
+                str(signal.get("severity", "medium")),
+                int(signal.get("points", 0) or 0),
                 {
-                    "security_count": metrics.get("security_count", 0),
-                    "threshold": count_threshold,
+                    "feature": signal.get("feature"),
+                    "value": signal.get("value"),
+                    "median": signal.get("median"),
+                    "mad": signal.get("mad"),
+                    "robust_z": signal.get("robust_z"),
+                    "abs_robust_z": signal.get("abs_robust_z"),
+                    "direction": signal.get("direction"),
                 },
             )
         )
 
-    if metrics.get("http_5xx_count", 0) >= max(10, int(metrics.get("total_records", 0) * 0.03)):
-        alerts.append(
-            _alert(
-                "server_failure_pattern",
-                "medium",
-                12,
-                {"http_5xx_count": metrics.get("http_5xx_count", 0)},
-            )
-        )
+    model_available = bool(model_signal.get("model_available"))
+    is_model_anomaly = bool(model_signal.get("is_anomaly", False))
+    anomaly_percentile = float(model_signal.get("anomaly_percentile", 0.0) or 0.0)
 
-    if metrics.get("max_events_from_single_ip", 0) >= max(25, int(metrics.get("system_log_count", 0) * 0.2)):
-        alerts.append(
-            _alert(
-                "ip_concentration",
-                "high",
-                18,
-                {
-                    "max_events_from_single_ip": metrics.get("max_events_from_single_ip", 0),
-                    "top_ip_event_share": metrics.get("top_ip_event_share", 0.0),
-                },
-            )
-        )
-
-    if metrics.get("unique_client_ips", 0) >= 20 and metrics.get("security_count", 0) > 0:
-        alerts.append(
-            _alert(
-                "multi_ip_pressure",
-                "medium",
-                10,
-                {"unique_client_ips": metrics.get("unique_client_ips", 0)},
-            )
-        )
-
-    if metrics.get("avg_llm_latency_ms", 0.0) >= 2500 or metrics.get("llm_timeout_rate", 0.0) >= 0.15:
-        alerts.append(
-            _alert(
-                "llm_latency_spike",
-                "medium",
-                10,
-                {
-                    "avg_llm_latency_ms": metrics.get("avg_llm_latency_ms", 0.0),
-                    "llm_timeout_rate": metrics.get("llm_timeout_rate", 0.0),
-                },
-            )
-        )
-
-    if model_signal.get("model_available") and model_signal.get("is_anomaly"):
-        percentile = float(model_signal.get("anomaly_percentile", 0.0))
+    if model_available and is_model_anomaly:
         alerts.append(
             _alert(
                 "anomaly_model_trigger",
                 "high",
-                max(15, min(35, int(percentile // 3))),
+                max(15, min(35, int(anomaly_percentile // 3))),
                 {
                     "anomaly_score": model_signal.get("anomaly_score", 0.0),
-                    "anomaly_percentile": percentile,
+                    "anomaly_percentile": anomaly_percentile,
                     "training_row_count": model_signal.get("training_row_count", 0),
                 },
             )
         )
 
     threat_score = min(100, sum(int(alert["score"]) for alert in alerts))
-    attack_predicted = threat_score >= attack_score_threshold
 
-    return alerts, {
+    pattern_status = str(historical_signal.get("pattern_status", "unknown"))
+    pattern_reason = str(historical_signal.get("pattern_reason", "unknown"))
+
+    attack_predicted = (
+        pattern_reason == "possible_attack_pattern"
+        and pattern_status in {"suspicious", "high_anomaly", "critical_anomaly"}
+        and threat_score >= int(attack_score_threshold)
+    )
+
+    # Model anomaly reinforces suspicious/high windows, but should not override
+    # explicit signs of incomplete ingestion.
+    if (
+        model_available
+        and is_model_anomaly
+        and pattern_reason in {"possible_attack_pattern", "upward_pattern_break"}
+        and threat_score >= max(50, int(attack_score_threshold) - 15)
+    ):
+        attack_predicted = True
+
+    if pattern_reason == "possible_incomplete_window":
+        attack_predicted = False
+
+    summary = {
         "threat_score": threat_score,
         "attack_predicted": attack_predicted,
         "detection_count": len(alerts),
-        "model_available": bool(model_signal.get("model_available")),
-        "anomaly_score": float(model_signal.get("anomaly_score", 0.0)),
-        "anomaly_percentile": float(model_signal.get("anomaly_percentile", 0.0)),
-        "is_anomaly": bool(model_signal.get("is_anomaly", False)),
+        "risk_level": pattern_status,
+        "anomaly_reason": pattern_reason,
+        "historical_available": bool(historical_signal.get("historical_available", False)),
+        "historical_source": historical_signal.get("historical_source", "unavailable"),
+        "pattern_score": float(historical_signal.get("pattern_score", 0.0) or 0.0),
+        "max_feature_deviation": float(historical_signal.get("max_feature_deviation", 0.0) or 0.0),
+        "pattern_signals": historical_signal.get("pattern_signals", []),
+        "model_available": model_available,
+        "anomaly_score": float(model_signal.get("anomaly_score", 0.0) or 0.0),
+        "anomaly_percentile": anomaly_percentile,
+        "is_anomaly": is_model_anomaly,
         "model_source": model_signal.get("source", "unavailable"),
         "records_evaluated": len(normalized_records),
+        "window_key": metrics.get("window_key"),
     }
+    return alerts, summary
 
 
 def _alert(alert_type: str, severity: str, score: int, payload: Dict[str, Any]) -> Dict[str, Any]:
     return {
-        "alert_type": alert_type.upper(),
+        "alert_type": str(alert_type).upper(),
         "severity": severity,
         "score": int(score),
         "payload": payload,
