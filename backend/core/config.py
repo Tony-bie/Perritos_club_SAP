@@ -6,7 +6,14 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
+def _is_cloud_foundry_runtime() -> bool:
+    return bool(os.getenv("VCAP_APPLICATION"))
+
+
 def _load_local_env_fallback() -> None:
+    if _is_cloud_foundry_runtime():
+        return
+
     env_path = Path(".env")
     if not env_path.exists():
         return
@@ -22,7 +29,9 @@ def _load_local_env_fallback() -> None:
 try:
     from dotenv import load_dotenv
 
-    load_dotenv()
+    # In Cloud Foundry, prefer process env / VCAP_* and avoid loading local .env files.
+    if not _is_cloud_foundry_runtime():
+        load_dotenv()
 except Exception:
     # Running without python-dotenv is allowed if env vars are already exported.
     _load_local_env_fallback()
@@ -153,11 +162,32 @@ def _get_vcap_hana_credentials() -> dict[str, str]:
 
 
 def _get_hana_value(*keys: str, default: str = "") -> str:
+    credentials = _get_vcap_hana_credentials()
+
+    # In Cloud Foundry, service binding credentials should win over manually set
+    # HANA_* variables so credential rotations don't break deployments.
+    prefer_vcap = _is_cloud_foundry_runtime() and bool(credentials)
+
+    if prefer_vcap:
+        for key in keys:
+            normalized = key.lower()
+            if normalized.startswith("sap_"):
+                normalized = normalized[4:]
+            if normalized.startswith("hana_"):
+                normalized = normalized[5:]
+            value = credentials.get(normalized)
+            if value:
+                return value
+
+        direct = _getenv(*keys, default="")
+        if direct:
+            return direct
+        return default
+
     direct = _getenv(*keys, default="")
     if direct:
         return direct
 
-    credentials = _get_vcap_hana_credentials()
     for key in keys:
         normalized = key.lower()
         if normalized.startswith("sap_"):
