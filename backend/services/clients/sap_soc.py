@@ -26,10 +26,12 @@ class SAPSOCClient:
     def _auth_headers(self) -> Dict[str, str]:
         return {"Authorization": f"Bearer {self.token}"}
 
-    def _get(
+    def _request(
         self,
+        method: str,
         path: str,
         params: Dict[str, Any] | None = None,
+        json_body: Dict[str, Any] | None = None,
         requires_auth: bool = True,
     ) -> Dict[str, Any]:
         if not self.base_url:
@@ -43,10 +45,12 @@ class SAPSOCClient:
         last_error: Exception | None = None
         for attempt in range(1, self.max_retries + 1):
             try:
-                response = self.session.get(
-                    url,
+                response = self.session.request(
+                    method=method,
+                    url=url,
                     headers=headers,
                     params=params,
+                    json=json_body,
                     timeout=self.timeout_seconds,
                 )
 
@@ -59,6 +63,8 @@ class SAPSOCClient:
                     continue
 
                 response.raise_for_status()
+                if not response.content:
+                    return {}
                 return response.json()
             except Exception as exc:
                 last_error = exc
@@ -67,6 +73,32 @@ class SAPSOCClient:
                 time.sleep(self.retry_backoff_seconds * attempt)
 
         raise RuntimeError(f"Request failed after retries: {last_error}")
+
+    def _get(
+        self,
+        path: str,
+        params: Dict[str, Any] | None = None,
+        requires_auth: bool = True,
+    ) -> Dict[str, Any]:
+        return self._request(
+            method="GET",
+            path=path,
+            params=params,
+            requires_auth=requires_auth,
+        )
+
+    def _post_json(
+        self,
+        path: str,
+        payload: Dict[str, Any],
+        requires_auth: bool = True,
+    ) -> Dict[str, Any]:
+        return self._request(
+            method="POST",
+            path=path,
+            json_body=payload,
+            requires_auth=requires_auth,
+        )
 
     def get_health(self) -> Dict[str, Any]:
         return self._get("/health", requires_auth=False)
@@ -99,3 +131,17 @@ class SAPSOCClient:
             "pages": pages,
             "records": records,
         }
+
+    def submit_alert(self, message: str) -> Dict[str, Any]:
+        compact_message = " ".join(str(message).split()).strip()
+        if not compact_message:
+            raise ValueError("Alert message cannot be empty")
+
+        if len(compact_message) > 300:
+            compact_message = f"{compact_message[:297].rstrip()}..."
+
+        return self._post_json(
+            "/alert",
+            payload={"message": compact_message},
+            requires_auth=True,
+        )

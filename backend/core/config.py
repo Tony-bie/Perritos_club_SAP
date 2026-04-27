@@ -51,8 +51,10 @@ class Settings:
     error_security_threshold: int
     attack_score_threshold: int
     model_enabled: bool
+    model_algorithm: str
     model_min_training_rows: int
     model_contamination: float
+    model_kmeans_clusters: int
     model_history_limit: int
 
 
@@ -229,7 +231,9 @@ def load_settings() -> Settings:
             70,
         ),
         model_enabled=_to_bool(_getenv("MODEL_ENABLED", default="true"), True),
+        model_algorithm=_getenv("MODEL_ALGORITHM", default="isolation_forest").lower(),
         model_min_training_rows=_to_int(_getenv("MODEL_MIN_TRAINING_ROWS", default="30"), 30),
         model_contamination=_to_float(_getenv("MODEL_CONTAMINATION", default="0.15"), 0.15),
+        model_kmeans_clusters=max(2, _to_int(_getenv("MODEL_KMEANS_CLUSTERS", default="4"), 4)),
         model_history_limit=_to_int(_getenv("MODEL_HISTORY_LIMIT", default="200"), 200),
     )
