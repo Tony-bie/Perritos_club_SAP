@@ -11,10 +11,12 @@ from fastapi import FastAPI, HTTPException
 from backend.core.config import load_settings
 from backend.services.clients import SAPSOCClient
 from backend.services.detection import (
+    build_alert_submission_message,
     evaluate_window_risk,
     format_alert_events,
     score_historical_pattern,
     score_window_metrics,
+    should_submit_alert_notification,
     unavailable_model_signal,
 )
 from backend.services.ingestion import (
@@ -108,6 +110,33 @@ def execute_ingestion_cycle() -> Dict[str, Any]:
     store.upsert_window_metrics(window_metrics)
     alert_events = format_alert_events(raw_alerts, run_id=run_id)
     alerts_inserted = store.insert_alerts(alert_events)
+    submitted_alert_response: Dict[str, Any] | None = None
+    submitted_alert_error: str | None = None
+    submitted_alert_message: str | None = None
+    submitted_alert_eligible = False
+    submitted_alert_reason = "no_detection_signals"
+
+    submitted_alert_eligible, submitted_alert_reason = should_submit_alert_notification(
+        window_metrics=window_metrics,
+        raw_alerts=raw_alerts,
+        attack_score_threshold=settings.attack_score_threshold,
+    )
+
+    if submitted_alert_eligible:
+        submitted_alert_message = build_alert_submission_message(
+            window_metrics=window_metrics,
+            raw_alerts=raw_alerts,
+            notification_reason=submitted_alert_reason,
+        )
+        try:
+            submitted_alert_response = client.submit_alert(submitted_alert_message)
+        except Exception as exc:
+            submitted_alert_error = str(exc)
+            logger.warning(
+                "Failed to submit alert to SAP endpoint. run_id=%s error=%s",
+                run_id,
+                exc,
+            )
 
     store.insert_ingest_run(run_data)
 
@@ -115,6 +144,15 @@ def execute_ingestion_cycle() -> Dict[str, Any]:
         "run": run_data,
         "upserted_records": upserted,
         "alerts_count": alerts_inserted,
+        "alert_submission": {
+            "attempted": bool(raw_alerts),
+            "eligible": submitted_alert_eligible,
+            "eligibility_reason": submitted_alert_reason,
+            "message": submitted_alert_message,
+            "submitted": submitted_alert_response is not None,
+            "response": submitted_alert_response,
+            "error": submitted_alert_error,
+        },
         "window_metrics": window_metrics,
         "model": model_signal,
     }

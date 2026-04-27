@@ -11,7 +11,6 @@ def evaluate_window_risk(
     count_threshold: int = 25,
     attack_score_threshold: int = 70,
 ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    del count_threshold  # Kept for backward compatibility with older call sites.
 
     alerts: List[Dict[str, Any]] = []
 
