@@ -49,7 +49,6 @@ jobs:
           CF_API="${CF_API//$'\r'/}"
           CF_API="${CF_API//$'\n'/}"
           CF_API="${CF_API%/}"
-          cf api "$CF_API"
           CF_USERNAME="${CF_USERNAME//$'\r'/}"
           CF_USERNAME="${CF_USERNAME//$'\n'/}"
           CF_PASSWORD="${CF_PASSWORD//$'\r'/}"
@@ -58,8 +57,7 @@ jobs:
           CF_ORG="${CF_ORG//$'\n'/}"
           CF_SPACE="${CF_SPACE//$'\r'/}"
           CF_SPACE="${CF_SPACE//$'\n'/}"
-          cf auth "$CF_USERNAME" "$CF_PASSWORD"
-          cf target -o "$CF_ORG" -s "$CF_SPACE"
+          cf login -a "$CF_API" -u "$CF_USERNAME" -p "$CF_PASSWORD" -o "$CF_ORG" -s "$CF_SPACE"
 
       - name: Push app without starting
         run: cf push --no-start
