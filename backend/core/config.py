@@ -5,6 +5,32 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+try:
+    import requests
+except ImportError:
+    requests = None
+
+
+def _get_oauth_token(uaa_url: str, clientid: str, clientsecret: str) -> str:
+    if not requests:
+        return ""
+    try:
+        response = requests.post(
+            f"{uaa_url}/oauth/token",
+            data={
+                "grant_type": "client_credentials",
+                "client_id": clientid,
+                "client_secret": clientsecret,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data.get("access_token", "")
+    except Exception:
+        return ""
+
 
 def _is_cloud_foundry_runtime() -> bool:
     return bool(os.getenv("VCAP_APPLICATION"))
@@ -54,6 +80,7 @@ class Settings:
     hana_port: int
     hana_user: str
     hana_password: str
+    hana_token: str
     hana_schema: str
     hana_encrypt: bool
     hana_validate_certificate: bool
@@ -140,6 +167,21 @@ def _get_vcap_hana_credentials() -> dict[str, str]:
             cleaned = _clean_str(str(value))
             if cleaned:
                 parsed[target_key] = cleaned
+
+    # For HANA Cloud, credentials are in the 'uaa' section for OAuth
+    uaa = credentials.get("uaa")
+    if isinstance(uaa, dict):
+        clientid = uaa.get("clientid")
+        clientsecret = uaa.get("clientsecret")
+        uaa_url = uaa.get("url")
+        if clientid and clientsecret and uaa_url:
+            token = _get_oauth_token(uaa_url, clientid, clientsecret)
+            if token:
+                parsed["user"] = _clean_str(str(clientid))
+                parsed["token"] = token
+                # For OAuth, password might not be needed, but set if available
+                if "password" not in parsed:
+                    parsed["password"] = token  # Some drivers use token as password
 
     jdbc_url = credentials.get("url")
     if isinstance(jdbc_url, str) and jdbc_url:
@@ -242,6 +284,7 @@ def load_settings() -> Settings:
         hana_port=_to_int(_get_hana_value("HANA_PORT", "SAP_HANA_PORT", default="443"), 443),
         hana_user=_get_hana_value("HANA_USER", "SAP_HANA_USER", default=""),
         hana_password=_get_hana_value("HANA_PASSWORD", "SAP_HANA_PASSWORD", default=""),
+        hana_token=_get_hana_value("HANA_TOKEN", default=""),
         hana_schema=_get_hana_value("HANA_SCHEMA", "SAP_HANA_SCHEMA", default="SOC_PIPELINE"),
         hana_encrypt=_to_bool(_get_hana_value("HANA_ENCRYPT", "SAP_HANA_ENCRYPT", default="true"), True),
         hana_validate_certificate=_to_bool(

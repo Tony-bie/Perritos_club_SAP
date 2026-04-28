@@ -40,6 +40,7 @@ def score_window_metrics(
             port=settings.hana_port,
             user=settings.hana_user,
             password=settings.hana_password,
+            token=settings.hana_token or None,
             encrypt=settings.hana_encrypt,
             sslValidateCertificate=settings.hana_validate_certificate,
         ) as connection:
