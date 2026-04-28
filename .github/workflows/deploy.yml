@@ -121,4 +121,8 @@ jobs:
         run: |
           APP_HEALTH_URL="${APP_HEALTH_URL//$'\r'/}"
           APP_HEALTH_URL="${APP_HEALTH_URL//$'\n'/}"
+          if [ -z "$APP_HEALTH_URL" ]; then
+            APP_ROUTE="$(cf app Perritos-backend | awk '/^routes:/ {print $2; exit}')"
+            APP_HEALTH_URL="https://${APP_ROUTE}/health"
+          fi
           curl --fail --silent --show-error "$APP_HEALTH_URL"
