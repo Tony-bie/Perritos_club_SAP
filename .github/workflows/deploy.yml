@@ -57,7 +57,7 @@ jobs:
           CF_ORG="${CF_ORG//$'\n'/}"
           CF_SPACE="${CF_SPACE//$'\r'/}"
           CF_SPACE="${CF_SPACE//$'\n'/}"
-          cf login -a "$CF_API" -u "$CF_USERNAME" -p "$CF_PASSWORD" -o "$CF_ORG" -s "$CF_SPACE"
+          cf login -a "$CF_API" -o "$CF_ORG" -s "$CF_SPACE"
 
       - name: Push app without starting
         run: cf push --no-start
