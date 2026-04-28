@@ -372,7 +372,6 @@ CF_USERNAME
 CF_PASSWORD
 CF_ORG
 CF_SPACE
-APP_HEALTH_URL
 SAP_SOC_BASE_URL
 SAP_SOC_TOKEN
 STORAGE_BACKEND
@@ -396,6 +395,9 @@ MODEL_MIN_TRAINING_ROWS
 MODEL_CONTAMINATION
 MODEL_HISTORY_LIMIT
 ```
+
+The smoke test will use `APP_HEALTH_URL` if you set it, and otherwise it will
+derive the deployed route from Cloud Foundry and probe `/health` directly.
 
 For production, prefer:
 
