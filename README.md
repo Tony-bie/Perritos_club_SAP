@@ -330,6 +330,80 @@ http://localhost:8000
 * `STORAGE_BACKEND=sqlite` (default local development)
 * `STORAGE_BACKEND=hana` (install `requirements-hana.txt` and configure HANA env vars)
 
+### DevOps Automation
+
+This repository includes a basic GitHub Actions setup:
+
+* `.github/workflows/ci.yml` runs on every push and pull request
+* `.github/workflows/deploy.yml` deploys to SAP BTP Cloud Foundry on pushes to `main` or manual dispatch
+
+#### CI Checks
+
+The CI workflow currently:
+
+* installs Python dependencies
+* compiles backend sources
+* runs the unit tests in `tests/`
+
+#### Cloud Foundry Deployment Notes
+
+The deploy workflow expects the app name in `manifest.yml` to remain:
+
+```text
+Perritos-backend
+```
+
+The workflow performs:
+
+1. test execution
+2. Cloud Foundry login
+3. `cf push --no-start`
+4. `cf set-env` for production settings
+5. `cf start Perritos-backend`
+6. smoke test against the deployed `/health` URL
+
+#### Required GitHub Secrets
+
+To enable Cloud Foundry deploys, configure these GitHub secrets:
+
+```text
+CF_API
+CF_USERNAME
+CF_PASSWORD
+CF_ORG
+CF_SPACE
+APP_HEALTH_URL
+SAP_SOC_BASE_URL
+SAP_SOC_TOKEN
+STORAGE_BACKEND
+SQLITE_PATH
+HANA_HOST
+HANA_PORT
+HANA_USER
+HANA_PASSWORD
+HANA_SCHEMA
+HANA_ENCRYPT
+HANA_VALIDATE_CERTIFICATE
+ENABLE_WORKER
+POLL_INTERVAL_MINUTES
+REQUEST_TIMEOUT_SECONDS
+MAX_RETRIES
+RETRY_BACKOFF_SECONDS
+ERROR_SECURITY_THRESHOLD
+ATTACK_SCORE_THRESHOLD
+MODEL_ENABLED
+MODEL_MIN_TRAINING_ROWS
+MODEL_CONTAMINATION
+MODEL_HISTORY_LIMIT
+```
+
+For production, prefer:
+
+```text
+STORAGE_BACKEND=hana
+ENABLE_WORKER=true
+```
+
 ---
 
 ## First Milestone
