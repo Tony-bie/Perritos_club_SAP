@@ -1,0 +1,110 @@
+name: Deploy to SAP BTP Cloud Foundry
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+
+      - name: Install Cloud Foundry CLI v8
+        run: |
+          wget -q -O - https://packages.cloudfoundry.org/debian/cli.cloudfoundry.org.key | sudo gpg --dearmor -o /usr/share/keyrings/cli.cloudfoundry.org.gpg
+          echo "deb [signed-by=/usr/share/keyrings/cli.cloudfoundry.org.gpg] https://packages.cloudfoundry.org/debian stable main" | sudo tee /etc/apt/sources.list.d/cloudfoundry-cli.list
+          sudo apt-get update
+          sudo apt-get install -y cf8-cli
+
+      - name: Run tests before deploy
+        run: python -m unittest discover -s tests -v
+
+      - name: Log in to Cloud Foundry
+        env:
+          CF_API: ${{ secrets.CF_API }}
+          CF_USERNAME: ${{ secrets.CF_USERNAME }}
+          CF_PASSWORD: ${{ secrets.CF_PASSWORD }}
+          CF_ORG: ${{ secrets.CF_ORG }}
+          CF_SPACE: ${{ secrets.CF_SPACE }}
+        run: |
+          cf api "$CF_API"
+          cf auth "$CF_USERNAME" "$CF_PASSWORD"
+          cf target -o "$CF_ORG" -s "$CF_SPACE"
+
+      - name: Push app without starting
+        run: cf push --no-start
+
+      - name: Set production environment variables
+        env:
+          SAP_SOC_BASE_URL: ${{ secrets.SAP_SOC_BASE_URL }}
+          SAP_SOC_TOKEN: ${{ secrets.SAP_SOC_TOKEN }}
+          STORAGE_BACKEND: ${{ secrets.STORAGE_BACKEND }}
+          SQLITE_PATH: ${{ secrets.SQLITE_PATH }}
+          HANA_HOST: ${{ secrets.HANA_HOST }}
+          HANA_PORT: ${{ secrets.HANA_PORT }}
+          HANA_USER: ${{ secrets.HANA_USER }}
+          HANA_PASSWORD: ${{ secrets.HANA_PASSWORD }}
+          HANA_SCHEMA: ${{ secrets.HANA_SCHEMA }}
+          HANA_ENCRYPT: ${{ secrets.HANA_ENCRYPT }}
+          HANA_VALIDATE_CERTIFICATE: ${{ secrets.HANA_VALIDATE_CERTIFICATE }}
+          ENABLE_WORKER: ${{ secrets.ENABLE_WORKER }}
+          POLL_INTERVAL_MINUTES: ${{ secrets.POLL_INTERVAL_MINUTES }}
+          REQUEST_TIMEOUT_SECONDS: ${{ secrets.REQUEST_TIMEOUT_SECONDS }}
+          MAX_RETRIES: ${{ secrets.MAX_RETRIES }}
+          RETRY_BACKOFF_SECONDS: ${{ secrets.RETRY_BACKOFF_SECONDS }}
+          ERROR_SECURITY_THRESHOLD: ${{ secrets.ERROR_SECURITY_THRESHOLD }}
+          ATTACK_SCORE_THRESHOLD: ${{ secrets.ATTACK_SCORE_THRESHOLD }}
+          MODEL_ENABLED: ${{ secrets.MODEL_ENABLED }}
+          MODEL_MIN_TRAINING_ROWS: ${{ secrets.MODEL_MIN_TRAINING_ROWS }}
+          MODEL_CONTAMINATION: ${{ secrets.MODEL_CONTAMINATION }}
+          MODEL_HISTORY_LIMIT: ${{ secrets.MODEL_HISTORY_LIMIT }}
+        run: |
+          cf set-env Perritos-backend SAP_SOC_BASE_URL "$SAP_SOC_BASE_URL"
+          cf set-env Perritos-backend SAP_SOC_TOKEN "$SAP_SOC_TOKEN"
+          cf set-env Perritos-backend STORAGE_BACKEND "$STORAGE_BACKEND"
+          cf set-env Perritos-backend SQLITE_PATH "$SQLITE_PATH"
+          cf set-env Perritos-backend HANA_HOST "$HANA_HOST"
+          cf set-env Perritos-backend HANA_PORT "$HANA_PORT"
+          cf set-env Perritos-backend HANA_USER "$HANA_USER"
+          cf set-env Perritos-backend HANA_PASSWORD "$HANA_PASSWORD"
+          cf set-env Perritos-backend HANA_SCHEMA "$HANA_SCHEMA"
+          cf set-env Perritos-backend HANA_ENCRYPT "$HANA_ENCRYPT"
+          cf set-env Perritos-backend HANA_VALIDATE_CERTIFICATE "$HANA_VALIDATE_CERTIFICATE"
+          cf set-env Perritos-backend ENABLE_WORKER "$ENABLE_WORKER"
+          cf set-env Perritos-backend POLL_INTERVAL_MINUTES "$POLL_INTERVAL_MINUTES"
+          cf set-env Perritos-backend REQUEST_TIMEOUT_SECONDS "$REQUEST_TIMEOUT_SECONDS"
+          cf set-env Perritos-backend MAX_RETRIES "$MAX_RETRIES"
+          cf set-env Perritos-backend RETRY_BACKOFF_SECONDS "$RETRY_BACKOFF_SECONDS"
+          cf set-env Perritos-backend ERROR_SECURITY_THRESHOLD "$ERROR_SECURITY_THRESHOLD"
+          cf set-env Perritos-backend ATTACK_SCORE_THRESHOLD "$ATTACK_SCORE_THRESHOLD"
+          cf set-env Perritos-backend MODEL_ENABLED "$MODEL_ENABLED"
+          cf set-env Perritos-backend MODEL_MIN_TRAINING_ROWS "$MODEL_MIN_TRAINING_ROWS"
+          cf set-env Perritos-backend MODEL_CONTAMINATION "$MODEL_CONTAMINATION"
+          cf set-env Perritos-backend MODEL_HISTORY_LIMIT "$MODEL_HISTORY_LIMIT"
+
+      - name: Start application with updated environment
+        run: cf start Perritos-backend
+
+      - name: Smoke test deployed health endpoint
+        env:
+          APP_HEALTH_URL: ${{ secrets.APP_HEALTH_URL }}
+        run: curl --fail --silent --show-error "$APP_HEALTH_URL"
