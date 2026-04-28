@@ -47,7 +47,7 @@ jobs:
           CF_SPACE: ${{ secrets.CF_SPACE }}
         run: |
           cf api "$CF_API"
-          cf auth -- "$CF_USERNAME" "$CF_PASSWORD"
+          cf auth "$CF_USERNAME" "$CF_PASSWORD"
           cf target -o "$CF_ORG" -s "$CF_SPACE"
 
       - name: Push app without starting
