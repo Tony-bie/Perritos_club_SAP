@@ -118,4 +118,7 @@ jobs:
       - name: Smoke test deployed health endpoint
         env:
           APP_HEALTH_URL: ${{ secrets.APP_HEALTH_URL }}
-        run: curl --fail --silent --show-error "$APP_HEALTH_URL"
+        run: |
+          APP_HEALTH_URL="${APP_HEALTH_URL//$'\r'/}"
+          APP_HEALTH_URL="${APP_HEALTH_URL//$'\n'/}"
+          curl --fail --silent --show-error "$APP_HEALTH_URL"
