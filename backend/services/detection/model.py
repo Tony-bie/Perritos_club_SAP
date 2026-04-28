@@ -35,14 +35,20 @@ def score_window_metrics(
         return unavailable_model_signal(f"hana_ml_unavailable:{exc}")
 
     try:
-        with ConnectionContext(
-            address=settings.hana_host,
-            port=settings.hana_port,
-            user=settings.hana_user,
-            password=settings.hana_password,
-            encrypt=settings.hana_encrypt,
-            sslValidateCertificate=settings.hana_validate_certificate,
-        ) as connection:
+        conn_kwargs = {
+            "address": settings.hana_host,
+            "port": settings.hana_port,
+            "encrypt": settings.hana_encrypt,
+            "sslValidateCertificate": settings.hana_validate_certificate,
+        }
+        if settings.hana_token:
+            conn_kwargs["user"] = settings.hana_user
+            conn_kwargs["password"] = settings.hana_token
+        else:
+            conn_kwargs["user"] = settings.hana_user
+            conn_kwargs["password"] = settings.hana_password
+
+        with ConnectionContext(**conn_kwargs) as connection:
             feature_columns = [column.upper() for column in NUMERIC_FEATURE_COLUMNS]
             feature_df = (
                 connection.table("WINDOW_FEATURES", schema=settings.hana_schema)
