@@ -92,6 +92,11 @@ class Settings:
     model_contamination: float
     model_kmeans_clusters: int
     model_history_limit: int
+    # Bloque B: Optimización y retención
+    batch_size: int
+    retention_days: int
+    cleanup_schedule_enabled: bool
+    cleanup_schedule_hour: int
 
 
 def _clean_str(value: str | None, default: str = "") -> str:
@@ -309,4 +314,9 @@ def load_settings() -> Settings:
         model_contamination=_to_float(_getenv("MODEL_CONTAMINATION", default="0.15"), 0.15),
         model_kmeans_clusters=max(2, _to_int(_getenv("MODEL_KMEANS_CLUSTERS", default="4"), 4)),
         model_history_limit=_to_int(_getenv("MODEL_HISTORY_LIMIT", default="200"), 200),
+        # Bloque B: Optimización y retención
+        batch_size=max(1, _to_int(_getenv("BATCH_SIZE", default="1000"), 1000)),
+        retention_days=max(7, _to_int(_getenv("RETENTION_DAYS", default="90"), 90)),
+        cleanup_schedule_enabled=_to_bool(_getenv("CLEANUP_SCHEDULE_ENABLED", default="true"), True),
+        cleanup_schedule_hour=max(0, min(23, _to_int(_getenv("CLEANUP_SCHEDULE_HOUR", default="2"), 2))),
     )
