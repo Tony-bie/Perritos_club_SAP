@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from abc import ABC, abstractmethod
@@ -106,10 +107,12 @@ class SqliteStore(BaseStore):
                 """
                 CREATE TABLE IF NOT EXISTS window_metrics (
                     window_key TEXT PRIMARY KEY,
+                    run_id TEXT,
                     window_start TEXT,
                     window_end TEXT,
                     total_records INTEGER NOT NULL,
                     threat_score INTEGER NOT NULL,
+                    detection_count INTEGER NOT NULL DEFAULT 0,
                     attack_predicted INTEGER NOT NULL,
                     model_available INTEGER NOT NULL,
                     is_anomaly INTEGER NOT NULL,
@@ -124,11 +127,15 @@ class SqliteStore(BaseStore):
                 f"""
                 CREATE TABLE IF NOT EXISTS window_features (
                     window_key TEXT PRIMARY KEY,
+                    run_id TEXT,
                     {", ".join(f"{column} REAL NOT NULL" for column in NUMERIC_FEATURE_COLUMNS)},
                     saved_at_utc TEXT NOT NULL
                 )
                 """
             )
+            self._ensure_sqlite_column(conn, "window_metrics", "run_id", "TEXT")
+            self._ensure_sqlite_column(conn, "window_metrics", "detection_count", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_sqlite_column(conn, "window_features", "run_id", "TEXT")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_logs_log_ts ON raw_logs(log_ts)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_started ON ingest_runs(started_at_utc)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_window_metrics_saved ON window_metrics(saved_at_utc)")
@@ -232,16 +239,18 @@ class SqliteStore(BaseStore):
             conn.execute(
                 """
                 INSERT OR REPLACE INTO window_metrics
-                (window_key, window_start, window_end, total_records, threat_score, attack_predicted,
+                (window_key, run_id, window_start, window_end, total_records, threat_score, detection_count, attack_predicted,
                  model_available, is_anomaly, anomaly_score, anomaly_percentile, summary_json, saved_at_utc)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     metrics.get("window_key"),
+                    metrics.get("run_id"),
                     metrics.get("window_start"),
                     metrics.get("window_end"),
                     int(metrics.get("total_records", 0)),
                     int(metrics.get("threat_score", 0)),
+                    int(metrics.get("detection_count", 0)),
                     int(bool(metrics.get("attack_predicted", False))),
                     int(bool(metrics.get("model_available", False))),
                     int(bool(metrics.get("is_anomaly", False))),
@@ -256,11 +265,12 @@ class SqliteStore(BaseStore):
             conn.execute(
                 f"""
                 INSERT OR REPLACE INTO window_features
-                (window_key, {feature_columns}, saved_at_utc)
-                VALUES (?, {feature_placeholders}, ?)
+                (window_key, run_id, {feature_columns}, saved_at_utc)
+                VALUES (?, ?, {feature_placeholders}, ?)
                 """,
                 (
                     metrics.get("window_key"),
+                    metrics.get("run_id"),
                     *[float(metrics.get(column, 0.0) or 0.0) for column in NUMERIC_FEATURE_COLUMNS],
                     metrics.get("saved_at_utc") or datetime.utcnow().isoformat(),
                 ),
@@ -301,7 +311,16 @@ class SqliteStore(BaseStore):
     @staticmethod
     def _fallback_id(record: Dict[str, Any]) -> str:
         payload = json.dumps(record, sort_keys=True, ensure_ascii=True)
-        return str(abs(hash(payload)))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _ensure_sqlite_column(conn: sqlite3.Connection, table_name: str, column_name: str, column_type: str) -> None:
+        columns = {
+            str(row["name"]).lower()
+            for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        if column_name.lower() not in columns:
+            conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
 
 
 class HanaStore(BaseStore):
@@ -392,10 +411,12 @@ class HanaStore(BaseStore):
                 f'''
                 CREATE COLUMN TABLE "{schema}"."WINDOW_METRICS" (
                     WINDOW_KEY NVARCHAR(128) PRIMARY KEY,
+                    RUN_ID NVARCHAR(64),
                     WINDOW_START NVARCHAR(64),
                     WINDOW_END NVARCHAR(64),
                     TOTAL_RECORDS INTEGER,
                     THREAT_SCORE INTEGER,
+                    DETECTION_COUNT INTEGER,
                     ATTACK_PREDICTED TINYINT,
                     MODEL_AVAILABLE TINYINT,
                     IS_ANOMALY TINYINT,
@@ -408,6 +429,7 @@ class HanaStore(BaseStore):
                 f'''
                 CREATE COLUMN TABLE "{schema}"."WINDOW_FEATURES" (
                     WINDOW_KEY NVARCHAR(128) PRIMARY KEY,
+                    RUN_ID NVARCHAR(64),
                     TOTAL_RECORDS DOUBLE,
                     SYSTEM_LOG_COUNT DOUBLE,
                     LLM_LOG_COUNT DOUBLE,
@@ -416,6 +438,8 @@ class HanaStore(BaseStore):
                     WARNING_COUNT DOUBLE,
                     AUDIT_COUNT DOUBLE,
                     DEBUG_COUNT DOUBLE,
+                    UNIQUE_CLIENT_IPS DOUBLE,
+                    UNIQUE_SERVICES DOUBLE,
                     PERF_COUNT DOUBLE,
                     HTTP_4XX_COUNT DOUBLE,
                     HTTP_5XX_COUNT DOUBLE,
@@ -441,6 +465,12 @@ class HanaStore(BaseStore):
                     cursor.execute(statement)
                 except Exception:
                     pass
+
+            self._ensure_hana_column(cursor, schema, "WINDOW_METRICS", "RUN_ID", "NVARCHAR(64)")
+            self._ensure_hana_column(cursor, schema, "WINDOW_METRICS", "DETECTION_COUNT", "INTEGER")
+            self._ensure_hana_column(cursor, schema, "WINDOW_FEATURES", "RUN_ID", "NVARCHAR(64)")
+            for column in NUMERIC_FEATURE_COLUMNS:
+                self._ensure_hana_column(cursor, schema, "WINDOW_FEATURES", column.upper(), "DOUBLE")
 
             conn.commit()
 
@@ -572,18 +602,20 @@ class HanaStore(BaseStore):
             cursor = conn.cursor()
             statement = (
                 f'UPSERT "{schema}"."WINDOW_METRICS" '
-                '(WINDOW_KEY, WINDOW_START, WINDOW_END, TOTAL_RECORDS, THREAT_SCORE, ATTACK_PREDICTED, '
+                '(WINDOW_KEY, RUN_ID, WINDOW_START, WINDOW_END, TOTAL_RECORDS, THREAT_SCORE, DETECTION_COUNT, ATTACK_PREDICTED, '
                 'MODEL_AVAILABLE, IS_ANOMALY, ANOMALY_SCORE, ANOMALY_PERCENTILE, SUMMARY_JSON, SAVED_AT_UTC) '
-                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) WITH PRIMARY KEY'
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) WITH PRIMARY KEY'
             )
             cursor.execute(
                 statement,
                 (
                     metrics.get("window_key"),
+                    metrics.get("run_id"),
                     metrics.get("window_start"),
                     metrics.get("window_end"),
                     int(metrics.get("total_records", 0)),
                     int(metrics.get("threat_score", 0)),
+                    int(metrics.get("detection_count", 0)),
                     int(bool(metrics.get("attack_predicted", False))),
                     int(bool(metrics.get("model_available", False))),
                     int(bool(metrics.get("is_anomaly", False))),
@@ -598,14 +630,15 @@ class HanaStore(BaseStore):
             feature_placeholders = ", ".join("?" for _ in feature_columns)
             feature_statement = (
                 f'UPSERT "{schema}"."WINDOW_FEATURES" '
-                f'(WINDOW_KEY, {feature_column_sql}, SAVED_AT_UTC) '
-                f'VALUES (?, {feature_placeholders}, ?) '
+                f'(WINDOW_KEY, RUN_ID, {feature_column_sql}, SAVED_AT_UTC) '
+                f'VALUES (?, ?, {feature_placeholders}, ?) '
                 'WITH PRIMARY KEY'
             )
             cursor.execute(
                 feature_statement,
                 (
                     metrics.get("window_key"),
+                    metrics.get("run_id"),
                     *[float(metrics.get(column, 0.0) or 0.0) for column in NUMERIC_FEATURE_COLUMNS],
                     metrics.get("saved_at_utc") or datetime.utcnow().isoformat(),
                 ),
@@ -647,6 +680,22 @@ class HanaStore(BaseStore):
     def get_latest_window_metrics(self) -> Optional[Dict[str, Any]]:
         results = self.get_recent_window_metrics(limit=1)
         return results[0] if results else None
+
+    @staticmethod
+    def _ensure_hana_column(cursor: Any, schema: str, table_name: str, column_name: str, column_type: str) -> None:
+        cursor.execute(
+            """
+            SELECT COUNT(*)
+            FROM SYS.TABLE_COLUMNS
+            WHERE SCHEMA_NAME = ?
+              AND TABLE_NAME = ?
+              AND COLUMN_NAME = ?
+            """,
+            (schema, table_name.upper(), column_name.upper()),
+        )
+        exists = int(cursor.fetchone()[0] or 0) > 0
+        if not exists:
+            cursor.execute(f'ALTER TABLE "{schema}"."{table_name}" ADD ("{column_name}" {column_type})')
 
 
 def create_store(settings: Settings) -> BaseStore:

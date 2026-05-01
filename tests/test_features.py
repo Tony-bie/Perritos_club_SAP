@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 
 from backend.services.ingestion.features import build_window_metrics
 from backend.services.ingestion.normalize import normalize_records
+from backend.storage.backends.store import SqliteStore
 
 
 class IngestionFeatureTests(unittest.TestCase):
     def test_normalize_records_marks_llm_and_system_logs(self) -> None:
         records = [
-            {"_id": "1", "sap_function_log_type": "LLM_TIMEOUT"},
+            {"_id": "1", "sap_function_log_type": "llm_timeout"},
             {"_id": "2", "sap_function_log_type": "ERROR"},
         ]
 
@@ -66,6 +69,35 @@ class IngestionFeatureTests(unittest.TestCase):
         self.assertEqual(metrics["llm_timeout_count"], 1)
         self.assertEqual(metrics["avg_llm_latency_ms"], 3100)
         self.assertAlmostEqual(metrics["total_llm_cost_usd"], 0.42)
+
+    def test_sqlite_store_persists_run_id_and_detection_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            store = SqliteStore(str(Path(tmp_dir) / "pipeline.db"))
+            store.ensure_schema()
+
+            store.upsert_window_metrics(
+                {
+                    "window_key": "w1",
+                    "run_id": "r1",
+                    "window_start": "2026-04-25T10:00:00+00:00",
+                    "window_end": "2026-04-25T10:30:00+00:00",
+                    "total_records": 1,
+                    "threat_score": 80,
+                    "detection_count": 2,
+                    "attack_predicted": True,
+                    "model_available": True,
+                    "is_anomaly": True,
+                    "anomaly_score": 99.0,
+                    "anomaly_percentile": 100.0,
+                    "saved_at_utc": "2026-04-25T10:30:00+00:00",
+                }
+            )
+
+            latest = store.get_latest_window_metrics()
+
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest["run_id"], "r1")
+        self.assertEqual(latest["detection_count"], 2)
 
 
 if __name__ == "__main__":
