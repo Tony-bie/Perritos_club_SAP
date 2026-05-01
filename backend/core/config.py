@@ -275,7 +275,7 @@ def load_settings() -> Settings:
         sap_soc_token=_getenv("SAP_SOC_TOKEN", default=""),
         app_host=_getenv("APP_HOST", default="0.0.0.0"),
         app_port=_to_int(os.getenv("APP_PORT"), 8000),
-        enable_worker=_to_bool(_getenv("ENABLE_WORKER", default="false"), False),
+        enable_worker=_to_bool(_getenv("ENABLE_WORKER", default="true"), True),
         poll_interval_minutes=_resolve_poll_interval_minutes(),
         request_timeout_seconds=_to_int(
             _getenv("REQUEST_TIMEOUT_SECONDS", "SAP_SOC_TIMEOUT_SECONDS", default="30"),
