@@ -173,21 +173,6 @@ def _get_vcap_hana_credentials() -> dict[str, str]:
             if cleaned:
                 parsed[target_key] = cleaned
 
-    # For HANA Cloud, credentials are in the 'uaa' section for OAuth
-    uaa = credentials.get("uaa")
-    if isinstance(uaa, dict):
-        clientid = uaa.get("clientid")
-        clientsecret = uaa.get("clientsecret")
-        uaa_url = uaa.get("url")
-        if clientid and clientsecret and uaa_url:
-            token = _get_oauth_token(uaa_url, clientid, clientsecret)
-            if token:
-                parsed["user"] = _clean_str(str(clientid))
-                parsed["token"] = token
-                # For OAuth, password might not be needed, but set if available
-                if "password" not in parsed:
-                    parsed["password"] = token  # Some drivers use token as password
-
     jdbc_url = credentials.get("url")
     if isinstance(jdbc_url, str) and jdbc_url:
         normalized_url = jdbc_url.replace("jdbc:sap://", "https://", 1)
@@ -210,6 +195,9 @@ def _get_vcap_hana_credentials() -> dict[str, str]:
 
 def _get_hana_value(*keys: str, default: str = "") -> str:
     credentials = _get_vcap_hana_credentials()
+    direct = _getenv(*keys, default="")
+    if direct:
+        return direct
 
     # In Cloud Foundry, service binding credentials should win over manually set
     # HANA_* variables so credential rotations don't break deployments.
@@ -226,14 +214,7 @@ def _get_hana_value(*keys: str, default: str = "") -> str:
             if value:
                 return value
 
-        direct = _getenv(*keys, default="")
-        if direct:
-            return direct
         return default
-
-    direct = _getenv(*keys, default="")
-    if direct:
-        return direct
 
     for key in keys:
         normalized = key.lower()
@@ -285,10 +266,10 @@ def load_settings() -> Settings:
         retry_backoff_seconds=_to_int(os.getenv("RETRY_BACKOFF_SECONDS"), 2),
         storage_backend=_resolve_storage_backend(),
         sqlite_path=_getenv("SQLITE_PATH", default="./pipeline.db"),
-        hana_host=_get_hana_value("HANA_HOST", "SAP_HANA_HOST", default=""),
-        hana_port=_to_int(_get_hana_value("HANA_PORT", "SAP_HANA_PORT", default="443"), 443),
-        hana_user=_get_hana_value("HANA_USER", "SAP_HANA_USER", default=""),
-        hana_password=_get_hana_value("HANA_PASSWORD", "SAP_HANA_PASSWORD", default=""),
+        hana_host=_get_hana_value("HANA_HOST", "SAP_HANA_HOST", "DB_HOST", default=""),
+        hana_port=_to_int(_get_hana_value("HANA_PORT", "SAP_HANA_PORT", "DB_PORT", default="443"), 443),
+        hana_user=_get_hana_value("HANA_USER", "SAP_HANA_USER", "DB_USER", default=""),
+        hana_password=_get_hana_value("HANA_PASSWORD", "SAP_HANA_PASSWORD", "DB_PASSWORD", default=""),
         hana_token=_get_hana_value("HANA_TOKEN", default=""),
         hana_schema=_get_hana_value("HANA_SCHEMA", "SAP_HANA_SCHEMA", default="SOC_PIPELINE"),
         hana_encrypt=_to_bool(_get_hana_value("HANA_ENCRYPT", "SAP_HANA_ENCRYPT", default="true"), True),
