@@ -260,21 +260,27 @@ class SqliteStore(BaseStore):
                     metrics.get("saved_at_utc") or datetime.utcnow().isoformat(),
                 ),
             )
-            feature_columns = ", ".join(NUMERIC_FEATURE_COLUMNS)
-            feature_placeholders = ", ".join("?" for _ in NUMERIC_FEATURE_COLUMNS)
-            conn.execute(
-                f"""
-                INSERT OR REPLACE INTO window_features
-                (window_key, run_id, {feature_columns}, saved_at_utc)
-                VALUES (?, ?, {feature_placeholders}, ?)
-                """,
-                (
-                    metrics.get("window_key"),
-                    metrics.get("run_id"),
-                    *[float(metrics.get(column, 0.0) or 0.0) for column in NUMERIC_FEATURE_COLUMNS],
-                    metrics.get("saved_at_utc") or datetime.utcnow().isoformat(),
-                ),
-            )
+            if _should_train_on_window(metrics):
+                feature_columns = ", ".join(NUMERIC_FEATURE_COLUMNS)
+                feature_placeholders = ", ".join("?" for _ in NUMERIC_FEATURE_COLUMNS)
+                conn.execute(
+                    f"""
+                    INSERT OR REPLACE INTO window_features
+                    (window_key, run_id, {feature_columns}, saved_at_utc)
+                    VALUES (?, ?, {feature_placeholders}, ?)
+                    """,
+                    (
+                        metrics.get("window_key"),
+                        metrics.get("run_id"),
+                        *[float(metrics.get(column, 0.0) or 0.0) for column in NUMERIC_FEATURE_COLUMNS],
+                        metrics.get("saved_at_utc") or datetime.utcnow().isoformat(),
+                    ),
+                )
+            else:
+                conn.execute(
+                    "DELETE FROM window_features WHERE window_key = ?",
+                    (metrics.get("window_key"),),
+                )
             conn.commit()
 
     def get_recent_window_metrics(self, limit: int = 200) -> List[Dict[str, Any]]:
@@ -297,6 +303,7 @@ class SqliteStore(BaseStore):
                 f"""
                 SELECT window_key, {feature_columns}, saved_at_utc
                 FROM window_features
+                WHERE total_records > 0
                 ORDER BY saved_at_utc DESC
                 LIMIT ?
                 """,
@@ -625,24 +632,30 @@ class HanaStore(BaseStore):
                     metrics.get("saved_at_utc") or datetime.utcnow().isoformat(),
                 ),
             )
-            feature_columns = [column.upper() for column in NUMERIC_FEATURE_COLUMNS]
-            feature_column_sql = ", ".join(feature_columns)
-            feature_placeholders = ", ".join("?" for _ in feature_columns)
-            feature_statement = (
-                f'UPSERT "{schema}"."WINDOW_FEATURES" '
-                f'(WINDOW_KEY, RUN_ID, {feature_column_sql}, SAVED_AT_UTC) '
-                f'VALUES (?, ?, {feature_placeholders}, ?) '
-                'WITH PRIMARY KEY'
-            )
-            cursor.execute(
-                feature_statement,
-                (
-                    metrics.get("window_key"),
-                    metrics.get("run_id"),
-                    *[float(metrics.get(column, 0.0) or 0.0) for column in NUMERIC_FEATURE_COLUMNS],
-                    metrics.get("saved_at_utc") or datetime.utcnow().isoformat(),
-                ),
-            )
+            if _should_train_on_window(metrics):
+                feature_columns = [column.upper() for column in NUMERIC_FEATURE_COLUMNS]
+                feature_column_sql = ", ".join(feature_columns)
+                feature_placeholders = ", ".join("?" for _ in feature_columns)
+                feature_statement = (
+                    f'UPSERT "{schema}"."WINDOW_FEATURES" '
+                    f'(WINDOW_KEY, RUN_ID, {feature_column_sql}, SAVED_AT_UTC) '
+                    f'VALUES (?, ?, {feature_placeholders}, ?) '
+                    'WITH PRIMARY KEY'
+                )
+                cursor.execute(
+                    feature_statement,
+                    (
+                        metrics.get("window_key"),
+                        metrics.get("run_id"),
+                        *[float(metrics.get(column, 0.0) or 0.0) for column in NUMERIC_FEATURE_COLUMNS],
+                        metrics.get("saved_at_utc") or datetime.utcnow().isoformat(),
+                    ),
+                )
+            else:
+                cursor.execute(
+                    f'DELETE FROM "{schema}"."WINDOW_FEATURES" WHERE WINDOW_KEY = ?',
+                    (metrics.get("window_key"),),
+                )
             conn.commit()
 
     def get_recent_window_metrics(self, limit: int = 200) -> List[Dict[str, Any]]:
@@ -669,6 +682,7 @@ class HanaStore(BaseStore):
                 f'''
                 SELECT WINDOW_KEY, {", ".join(feature_columns)}, SAVED_AT_UTC
                 FROM "{schema}"."WINDOW_FEATURES"
+                WHERE TOTAL_RECORDS > 0
                 ORDER BY SAVED_AT_UTC DESC
                 LIMIT {int(limit)}
                 '''
@@ -702,3 +716,14 @@ def create_store(settings: Settings) -> BaseStore:
     if settings.storage_backend == "hana":
         return HanaStore(settings)
     return SqliteStore(settings.sqlite_path)
+
+
+def _should_train_on_window(metrics: Dict[str, Any]) -> bool:
+    if int(metrics.get("total_records", 0) or 0) <= 0:
+        return False
+    return str(metrics.get("anomaly_reason", "")) not in {
+        "empty_window",
+        "possible_incomplete_window",
+        "llm_activity_drop",
+        "system_activity_drop",
+    }

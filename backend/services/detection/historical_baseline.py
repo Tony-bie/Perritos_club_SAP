@@ -6,10 +6,33 @@ from typing import Any, Dict, List
 from backend.services.ingestion.features import NUMERIC_FEATURE_COLUMNS
 
 
-INCOMPLETE_WINDOW_FEATURES = {
+CORE_VOLUME_FEATURES = {
     "total_records",
+    "system_log_count",
+    "llm_log_count",
+}
+
+LLM_ACTIVITY_DOWN_FEATURES = {
+    "llm_log_count",
+    "llm_request_count",
     "llm_error_count",
     "llm_timeout_count",
+    "avg_llm_latency_ms",
+    "p95_llm_latency_ms",
+    "total_llm_cost_usd",
+}
+
+SYSTEM_ACTIVITY_DOWN_FEATURES = {
+    "total_records",
+    "system_log_count",
+    "error_count",
+    "security_count",
+    "warning_count",
+    "audit_count",
+    "debug_count",
+    "perf_count",
+    "http_4xx_count",
+    "http_5xx_count",
 }
 
 ATTACK_UP_FEATURES = {
@@ -131,10 +154,14 @@ def _pattern_reason(signals: List[Dict[str, Any]]) -> str:
         and float(signal.get("abs_robust_z", 0.0)) >= 3.0
     }
 
-    if strong_down_features & INCOMPLETE_WINDOW_FEATURES:
-        return "possible_incomplete_window"
     if strong_up_features & ATTACK_UP_FEATURES:
         return "possible_attack_pattern"
+    if CORE_VOLUME_FEATURES.issubset(strong_down_features):
+        return "possible_incomplete_window"
+    if strong_down_features & LLM_ACTIVITY_DOWN_FEATURES:
+        return "llm_activity_drop"
+    if strong_down_features & SYSTEM_ACTIVITY_DOWN_FEATURES:
+        return "system_activity_drop"
     if strong_up_features:
         return "upward_pattern_break"
     if strong_down_features:
