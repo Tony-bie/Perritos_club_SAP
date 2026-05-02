@@ -114,7 +114,7 @@ def evaluate_window_risk(
                 )
             )
 
-    alerts.extend(_security_combination_alerts(metrics, count_threshold))
+    alerts.extend(_security_combination_alerts(metrics, count_threshold, pattern_reason))
     has_security_combination = _has_security_combination_alert(alerts)
 
     model_available = bool(model_signal.get("model_available"))
@@ -196,7 +196,11 @@ def _alert(alert_type: str, severity: str, score: int, payload: Dict[str, Any]) 
     }
 
 
-def _security_combination_alerts(metrics: Dict[str, Any], count_threshold: int) -> List[Dict[str, Any]]:
+def _security_combination_alerts(
+    metrics: Dict[str, Any],
+    count_threshold: int,
+    pattern_reason: str,
+) -> List[Dict[str, Any]]:
     security_count = _as_int(metrics.get("security_count"))
     error_count = _as_int(metrics.get("error_count"))
     http_4xx_count = _as_int(metrics.get("http_4xx_count"))
@@ -210,7 +214,23 @@ def _security_combination_alerts(metrics: Dict[str, Any], count_threshold: int) 
     threshold = max(1, int(count_threshold))
     alerts: List[Dict[str, Any]] = []
 
-    if security_count >= threshold and error_count >= threshold:
+    security_rate_elevated = security_event_rate >= 0.04
+    security_volume_elevated = security_count >= threshold * 3 and security_event_rate >= 0.035
+    security_single_ip_elevated = max_events_from_single_ip >= threshold and top_ip_event_share >= 0.25
+    historical_attack_context = pattern_reason == "possible_attack_pattern"
+    has_security_context = (
+        security_rate_elevated
+        or security_volume_elevated
+        or security_single_ip_elevated
+        or historical_attack_context
+    )
+
+    if not has_security_context:
+        return alerts
+
+    if security_count >= threshold and error_count >= threshold and (
+        security_rate_elevated or security_volume_elevated or historical_attack_context
+    ):
         severity = "critical" if security_event_rate >= 0.05 and system_error_rate >= 0.15 else "high"
         score = 30 if severity == "critical" else 22
         alerts.append(
@@ -228,7 +248,9 @@ def _security_combination_alerts(metrics: Dict[str, Any], count_threshold: int) 
         )
 
     http_failure_count = http_4xx_count + http_5xx_count
-    if security_count >= threshold and http_failure_count >= threshold:
+    if security_count >= threshold and http_failure_count >= threshold and (
+        security_rate_elevated or security_single_ip_elevated or historical_attack_context
+    ):
         severity = "critical" if http_5xx_count >= threshold else "high"
         score = 28 if severity == "critical" else 20
         alerts.append(
@@ -260,7 +282,11 @@ def _security_combination_alerts(metrics: Dict[str, Any], count_threshold: int) 
         )
 
     llm_failure_count = llm_error_count + llm_timeout_count
-    if security_count >= threshold and llm_failure_count >= threshold:
+    if security_count >= threshold and llm_failure_count >= threshold and (
+        pattern_reason == "llm_activity_drop"
+        or security_rate_elevated
+        or historical_attack_context
+    ):
         alerts.append(
             _alert(
                 "security_llm_disruption_correlation",

@@ -122,7 +122,7 @@ class DetectionTests(unittest.TestCase):
         self.assertEqual(summary["risk_level"], "service_activity_anomaly")
         self.assertEqual(summary["anomaly_reason"], "llm_activity_drop")
 
-    def test_security_combinations_emit_correlation_alerts_without_history(self) -> None:
+    def test_common_security_cooccurrence_does_not_predict_attack_without_context(self) -> None:
         alerts, summary = evaluate_window_risk(
             normalized_records=[{"_id": "1"}],
             metrics={
@@ -150,10 +150,45 @@ class DetectionTests(unittest.TestCase):
             },
         )
 
+        self.assertEqual(alerts, [])
+        self.assertEqual(summary["threat_score"], 0)
+        self.assertEqual(summary["detection_count"], 0)
+        self.assertFalse(summary["attack_predicted"])
+        self.assertEqual(summary["risk_level"], "unknown")
+        self.assertEqual(summary["anomaly_reason"], "insufficient_history")
+
+    def test_elevated_security_rate_emits_correlation_alerts(self) -> None:
+        alerts, summary = evaluate_window_risk(
+            normalized_records=[{"_id": "1"}],
+            metrics={
+                "window_key": "security-combo-window",
+                "total_records": 3921,
+                "security_count": 180,
+                "error_count": 700,
+                "llm_error_count": 174,
+                "llm_timeout_count": 75,
+                "security_event_rate": 0.058,
+                "system_error_rate": 0.225,
+            },
+            model_signal={
+                "model_available": False,
+                "source": "insufficient_history:7",
+            },
+            historical_signal={
+                "historical_available": False,
+                "historical_source": "insufficient_history:7",
+                "pattern_status": "unknown",
+                "pattern_reason": "insufficient_history",
+                "pattern_score": 0.0,
+                "max_feature_deviation": 0.0,
+                "pattern_signals": [],
+            },
+        )
+
         alert_types = {alert["alert_type"] for alert in alerts}
         self.assertIn("SECURITY_ERROR_CORRELATION", alert_types)
         self.assertIn("SECURITY_LLM_DISRUPTION_CORRELATION", alert_types)
-        self.assertEqual(summary["threat_score"], 42)
+        self.assertEqual(summary["threat_score"], 50)
         self.assertEqual(summary["detection_count"], 2)
         self.assertFalse(summary["attack_predicted"])
         self.assertEqual(summary["risk_level"], "security_correlation")
