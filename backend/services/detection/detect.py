@@ -13,6 +13,29 @@ def evaluate_window_risk(
 ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
 
     alerts: List[Dict[str, Any]] = []
+    total_records = int(metrics.get("total_records", len(normalized_records)) or 0)
+
+    if total_records <= 0:
+        summary = {
+            "threat_score": 0,
+            "attack_predicted": False,
+            "detection_count": 0,
+            "risk_level": "no_data",
+            "anomaly_reason": "empty_window",
+            "historical_available": bool(historical_signal.get("historical_available", False)),
+            "historical_source": historical_signal.get("historical_source", "unavailable"),
+            "pattern_score": 0.0,
+            "max_feature_deviation": 0.0,
+            "pattern_signals": [],
+            "model_available": bool(model_signal.get("model_available", False)),
+            "anomaly_score": 0.0,
+            "anomaly_percentile": 0.0,
+            "is_anomaly": False,
+            "model_source": model_signal.get("source", "unavailable"),
+            "records_evaluated": len(normalized_records),
+            "window_key": metrics.get("window_key"),
+        }
+        return alerts, summary
 
     for signal in historical_signal.get("pattern_signals", []):
         alerts.append(
