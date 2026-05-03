@@ -66,28 +66,30 @@ jobs:
 
       - name: Set production environment variables
         env:
-          SAP_SOC_BASE_URL: ${{ secrets.SAP_SOC_BASE_URL }}
+          SAP_SOC_BASE_URL: ${{ vars.SAP_SOC_BASE_URL }}
           SAP_SOC_TOKEN: ${{ secrets.SAP_SOC_TOKEN }}
-          STORAGE_BACKEND: ${{ secrets.STORAGE_BACKEND }}
-          SQLITE_PATH: ${{ secrets.SQLITE_PATH }}
-          HANA_HOST: ${{ secrets.HANA_HOST }}
-          HANA_PORT: ${{ secrets.HANA_PORT }}
-          HANA_USER: ${{ secrets.HANA_USER }}
+          STORAGE_BACKEND: ${{ vars.STORAGE_BACKEND || 'hana' }}
+          SQLITE_PATH: ${{ vars.SQLITE_PATH || './pipeline.db' }}
+          HANA_HOST: ${{ vars.HANA_HOST }}
+          HANA_PORT: ${{ vars.HANA_PORT || '443' }}
+          HANA_USER: ${{ vars.HANA_USER }}
           HANA_PASSWORD: ${{ secrets.HANA_PASSWORD }}
-          HANA_SCHEMA: ${{ secrets.HANA_SCHEMA }}
-          HANA_ENCRYPT: ${{ secrets.HANA_ENCRYPT }}
-          HANA_VALIDATE_CERTIFICATE: ${{ secrets.HANA_VALIDATE_CERTIFICATE }}
-          ENABLE_WORKER: ${{ secrets.ENABLE_WORKER }}
-          POLL_INTERVAL_MINUTES: ${{ secrets.POLL_INTERVAL_MINUTES }}
-          REQUEST_TIMEOUT_SECONDS: ${{ secrets.REQUEST_TIMEOUT_SECONDS }}
-          MAX_RETRIES: ${{ secrets.MAX_RETRIES }}
-          RETRY_BACKOFF_SECONDS: ${{ secrets.RETRY_BACKOFF_SECONDS }}
-          ERROR_SECURITY_THRESHOLD: ${{ secrets.ERROR_SECURITY_THRESHOLD }}
-          ATTACK_SCORE_THRESHOLD: ${{ secrets.ATTACK_SCORE_THRESHOLD }}
-          MODEL_ENABLED: ${{ secrets.MODEL_ENABLED }}
-          MODEL_MIN_TRAINING_ROWS: ${{ secrets.MODEL_MIN_TRAINING_ROWS }}
-          MODEL_CONTAMINATION: ${{ secrets.MODEL_CONTAMINATION }}
-          MODEL_HISTORY_LIMIT: ${{ secrets.MODEL_HISTORY_LIMIT }}
+          HANA_SCHEMA: ${{ vars.HANA_SCHEMA || 'SOC_PIPELINE' }}
+          HANA_ENCRYPT: ${{ vars.HANA_ENCRYPT || 'true' }}
+          HANA_VALIDATE_CERTIFICATE: ${{ vars.HANA_VALIDATE_CERTIFICATE || 'false' }}
+          ENABLE_WORKER: ${{ vars.ENABLE_WORKER || 'true' }}
+          POLL_INTERVAL_MINUTES: ${{ vars.POLL_INTERVAL_MINUTES || '5' }}
+          REQUEST_TIMEOUT_SECONDS: ${{ vars.REQUEST_TIMEOUT_SECONDS || '30' }}
+          MAX_RETRIES: ${{ vars.MAX_RETRIES || '3' }}
+          RETRY_BACKOFF_SECONDS: ${{ vars.RETRY_BACKOFF_SECONDS || '2' }}
+          ERROR_SECURITY_THRESHOLD: ${{ vars.ERROR_SECURITY_THRESHOLD || '40' }}
+          ATTACK_SCORE_THRESHOLD: ${{ vars.ATTACK_SCORE_THRESHOLD || '70' }}
+          MODEL_ENABLED: ${{ vars.MODEL_ENABLED || 'true' }}
+          MODEL_ALGORITHM: ${{ vars.MODEL_ALGORITHM || 'hybrid' }}
+          MODEL_MIN_TRAINING_ROWS: ${{ vars.MODEL_MIN_TRAINING_ROWS || '30' }}
+          MODEL_CONTAMINATION: ${{ vars.MODEL_CONTAMINATION || '0.15' }}
+          MODEL_KMEANS_CLUSTERS: ${{ vars.MODEL_KMEANS_CLUSTERS || '4' }}
+          MODEL_HISTORY_LIMIT: ${{ vars.MODEL_HISTORY_LIMIT || '200' }}
         run: |
           cf set-env Perritos-backend SAP_SOC_BASE_URL "$SAP_SOC_BASE_URL"
           cf set-env Perritos-backend SAP_SOC_TOKEN "$SAP_SOC_TOKEN"
@@ -108,8 +110,10 @@ jobs:
           cf set-env Perritos-backend ERROR_SECURITY_THRESHOLD "$ERROR_SECURITY_THRESHOLD"
           cf set-env Perritos-backend ATTACK_SCORE_THRESHOLD "$ATTACK_SCORE_THRESHOLD"
           cf set-env Perritos-backend MODEL_ENABLED "$MODEL_ENABLED"
+          cf set-env Perritos-backend MODEL_ALGORITHM "$MODEL_ALGORITHM"
           cf set-env Perritos-backend MODEL_MIN_TRAINING_ROWS "$MODEL_MIN_TRAINING_ROWS"
           cf set-env Perritos-backend MODEL_CONTAMINATION "$MODEL_CONTAMINATION"
+          cf set-env Perritos-backend MODEL_KMEANS_CLUSTERS "$MODEL_KMEANS_CLUSTERS"
           cf set-env Perritos-backend MODEL_HISTORY_LIMIT "$MODEL_HISTORY_LIMIT"
 
       - name: Start application with updated environment
@@ -117,7 +121,7 @@ jobs:
 
       - name: Smoke test deployed health endpoint
         env:
-          APP_HEALTH_URL: ${{ secrets.APP_HEALTH_URL }}
+          APP_HEALTH_URL: ${{ vars.APP_HEALTH_URL }}
         run: |
           APP_HEALTH_URL="${APP_HEALTH_URL//$'\r'/}"
           APP_HEALTH_URL="${APP_HEALTH_URL//$'\n'/}"

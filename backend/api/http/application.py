@@ -306,6 +306,76 @@ def run_ingestion() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.post("/run/reprocess-windows")
+def run_reprocess_windows(limit: int = 50, persist: bool = True) -> Dict[str, Any]:
+    if not _storage_status["ready"]:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Storage backend unavailable: {_storage_status['error'] or 'unknown error'}",
+        )
+
+    try:
+        windows = store.get_recent_window_metrics(limit=limit)
+        feature_history = store.get_recent_window_features(limit=settings.model_history_limit)
+        processed = []
+
+        for window_metrics in windows:
+            current_window_key = str(window_metrics.get("window_key") or "")
+            history_rows = [
+                row
+                for row in feature_history
+                if str(row.get("window_key") or "") != current_window_key
+            ]
+            historical_signal = score_historical_pattern(
+                current_metrics=window_metrics,
+                history_rows=history_rows,
+                min_history_rows=max(20, settings.model_min_training_rows),
+            )
+            model_signal = {
+                "model_available": bool(window_metrics.get("model_available", False)),
+                "is_anomaly": bool(window_metrics.get("is_anomaly", False)),
+                "anomaly_score": float(window_metrics.get("anomaly_score", 0.0) or 0.0),
+                "anomaly_percentile": float(window_metrics.get("anomaly_percentile", 0.0) or 0.0),
+                "source": "historical_reprocess_existing_model_state",
+            }
+            raw_alerts, risk_summary = evaluate_window_risk(
+                normalized_records=[],
+                metrics=window_metrics,
+                model_signal=model_signal,
+                historical_signal=historical_signal,
+                count_threshold=settings.error_security_threshold,
+                attack_score_threshold=settings.attack_score_threshold,
+            )
+            updated_metrics = dict(window_metrics)
+            updated_metrics.update(risk_summary)
+
+            if persist:
+                store.upsert_window_metrics(updated_metrics)
+
+            processed.append(
+                {
+                    "window_key": current_window_key,
+                    "total_records": updated_metrics.get("total_records", 0),
+                    "threat_score": updated_metrics.get("threat_score", 0),
+                    "detection_count": updated_metrics.get("detection_count", 0),
+                    "attack_predicted": updated_metrics.get("attack_predicted", False),
+                    "anomaly_reason": updated_metrics.get("anomaly_reason"),
+                    "risk_level": updated_metrics.get("risk_level"),
+                    "alert_types": [alert.get("alert_type") for alert in raw_alerts],
+                }
+            )
+
+        return {
+            "status": "ok",
+            "persisted": persist,
+            "processed_count": len(processed),
+            "windows": processed,
+        }
+    except Exception as exc:
+        logger.exception("Historical window reprocess failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.get("/status/latest")
 def status_latest() -> Dict[str, Any]:
     if not _storage_status["ready"]:
