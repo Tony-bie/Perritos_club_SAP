@@ -67,6 +67,7 @@ except Exception:
 class Settings:
     sap_soc_base_url: str
     sap_soc_token: str
+    admin_api_key: str
     app_host: str
     app_port: int
     enable_worker: bool
@@ -273,6 +274,7 @@ def load_settings() -> Settings:
     return Settings(
         sap_soc_base_url=_getenv("SAP_SOC_BASE_URL", default="").rstrip("/"),
         sap_soc_token=_getenv("SAP_SOC_TOKEN", default=""),
+        admin_api_key=_getenv("ADMIN_API_KEY", default=_getenv("SAP_SOC_TOKEN", default="")),
         app_host=_getenv("APP_HOST", default="0.0.0.0"),
         app_port=_to_int(os.getenv("APP_PORT"), 8000),
         enable_worker=_to_bool(_getenv("ENABLE_WORKER", default="false"), False),

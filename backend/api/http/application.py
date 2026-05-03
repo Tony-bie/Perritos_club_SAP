@@ -6,7 +6,8 @@ import time
 from typing import Any, Dict
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
+from pydantic import BaseModel
 
 from backend.core.config import load_settings
 from backend.services.clients import SAPSOCClient
@@ -52,6 +53,28 @@ _storage_status: Dict[str, Any] = {
 }
 
 
+class CleanupRequest(BaseModel):
+    retention_days: int = 90
+
+
+def _require_admin_token(
+    authorization: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None),
+) -> None:
+    expected_token = settings.admin_api_key or settings.sap_soc_token
+    if not expected_token:
+        raise HTTPException(status_code=503, detail="Admin auth is not configured")
+
+    provided_token = ""
+    if authorization and authorization.startswith("Bearer "):
+        provided_token = authorization.removeprefix("Bearer ").strip()
+    elif x_api_key:
+        provided_token = x_api_key.strip()
+
+    if provided_token != expected_token:
+        raise HTTPException(status_code=403, detail="Invalid admin token")
+
+
 def execute_ingestion_cycle() -> Dict[str, Any]:
     run_id = str(uuid4())
     ingest_result, records = run_ingestion_cycle(client, run_id=run_id)
@@ -66,13 +89,12 @@ def execute_ingestion_cycle() -> Dict[str, Any]:
         }
 
     normalized = normalize_records(records)
-    upserted = store.upsert_raw_logs(normalized)
+    upserted = store.bulk_upsert_raw_logs(normalized, batch_size=settings.batch_size)
     window_metrics = build_window_metrics(
         normalized_records=normalized,
         window_start=ingest_result.window_start,
         window_end=ingest_result.window_end,
     )
-    store.upsert_window_metrics(window_metrics)
     current_window_key = str(window_metrics.get("window_key") or "")
     history_rows = store.get_recent_window_features(limit=settings.model_history_limit)
     history_rows = [
@@ -107,7 +129,7 @@ def execute_ingestion_cycle() -> Dict[str, Any]:
     )
     window_metrics.update(risk_summary)
     window_metrics["run_id"] = run_id
-    store.upsert_window_metrics(window_metrics)
+    store.bulk_upsert_window_metrics([window_metrics], batch_size=settings.batch_size)
     alert_events = format_alert_events(raw_alerts, run_id=run_id)
     alerts_inserted = store.insert_alerts(alert_events)
     submitted_alert_response: Dict[str, Any] | None = None
@@ -255,6 +277,24 @@ def status_latest() -> Dict[str, Any]:
         "latest_run": latest,
         "latest_window_metrics": store.get_latest_window_metrics(),
     }
+
+
+@app.post("/api/admin/cleanup")
+def admin_cleanup(
+    payload: CleanupRequest,
+    _: None = Depends(_require_admin_token),
+) -> Dict[str, Any]:
+    if not _storage_status["ready"]:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Storage backend unavailable: {_storage_status['error'] or 'unknown error'}",
+        )
+
+    try:
+        return store.call_cleanup_procedure(retention_days=payload.retention_days)
+    except Exception as exc:
+        logger.exception("Cleanup failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 def run() -> None:
