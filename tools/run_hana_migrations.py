@@ -21,8 +21,8 @@ USER = os.environ.get('HANA_USER')
 PASSWORD = os.environ.get('HANA_PASSWORD')
 SCHEMA = os.environ.get('HANA_SCHEMA')
 
-if not all([HOST, PORT, USER, PASSWORD]):
-    print('Missing HANA connection env vars. Set HANA_HOST, HANA_PORT, HANA_USER, HANA_PASSWORD')
+if not all([HOST, PORT, USER, PASSWORD, SCHEMA]):
+    print('Missing HANA connection env vars. Set HANA_HOST, HANA_PORT, HANA_USER, HANA_PASSWORD, HANA_SCHEMA')
     sys.exit(2)
 
 encrypt = True if PORT == 443 else False
