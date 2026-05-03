@@ -70,6 +70,37 @@ class HistoricalBaselineTests(unittest.TestCase):
 
         self.assertEqual(reason, "possible_attack_pattern")
 
+    def test_single_medium_system_rate_spike_is_not_attack_pattern(self) -> None:
+        reason = _pattern_reason(
+            [
+                {
+                    "feature": "system_error_rate",
+                    "direction": "higher_than_usual",
+                    "abs_robust_z": 3.2,
+                },
+            ]
+        )
+
+        self.assertEqual(reason, "upward_pattern_break")
+
+    def test_multiple_medium_security_signals_can_be_attack_pattern(self) -> None:
+        reason = _pattern_reason(
+            [
+                {
+                    "feature": "system_error_rate",
+                    "direction": "higher_than_usual",
+                    "abs_robust_z": 3.2,
+                },
+                {
+                    "feature": "http_5xx_count",
+                    "direction": "higher_than_usual",
+                    "abs_robust_z": 3.1,
+                },
+            ]
+        )
+
+        self.assertEqual(reason, "possible_attack_pattern")
+
     def test_llm_rate_spike_without_security_context_is_quality_degradation(self) -> None:
         reason = _pattern_reason(
             [

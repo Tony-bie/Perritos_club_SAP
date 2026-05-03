@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from backend.services.ingestion.features import build_window_metrics
+from backend.services.ingestion.features import build_window_drilldown, build_window_metrics
 from backend.services.ingestion.normalize import normalize_records
 from backend.storage.backends.store import SqliteStore
 
@@ -69,6 +69,40 @@ class IngestionFeatureTests(unittest.TestCase):
         self.assertEqual(metrics["llm_timeout_count"], 1)
         self.assertEqual(metrics["avg_llm_latency_ms"], 3100)
         self.assertAlmostEqual(metrics["total_llm_cost_usd"], 0.42)
+
+    def test_build_window_drilldown_collects_security_evidence(self) -> None:
+        normalized = normalize_records(
+            [
+                {
+                    "_id": "1",
+                    "sap_function_log_type": "SECURITY",
+                    "client_ip": "10.0.0.1",
+                    "service_id": "svc-a",
+                    "http_status_code": 403,
+                },
+                {
+                    "_id": "2",
+                    "sap_function_log_type": "SECURITY",
+                    "client_ip": "10.0.0.1",
+                    "service_id": "svc-b",
+                    "http_status_code": 401,
+                },
+                {
+                    "_id": "3",
+                    "sap_function_log_type": "ERROR",
+                    "client_ip": "10.0.0.2",
+                    "service_id": "svc-a",
+                    "http_status_code": 500,
+                },
+            ]
+        )
+
+        drilldown = build_window_drilldown(normalized)
+
+        self.assertEqual(drilldown["top_log_types"][0]["value"], "SECURITY")
+        self.assertEqual(drilldown["top_security_client_ips"][0]["value"], "10.0.0.1")
+        self.assertEqual(drilldown["top_security_client_ips"][0]["count"], 2)
+        self.assertEqual(drilldown["top_services"][0]["value"], "svc-a")
 
     def test_sqlite_store_persists_run_id_and_detection_count(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -3,6 +3,9 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 
+BASELINE_SHIFT_REASONS = {"llm_activity_drop", "baseline_shift_candidate"}
+
+
 def evaluate_window_risk(
     normalized_records: List[Dict[str, Any]],
     metrics: Dict[str, Any],
@@ -35,6 +38,7 @@ def evaluate_window_risk(
             "records_evaluated": len(normalized_records),
             "window_key": metrics.get("window_key"),
         }
+        summary["explanation"] = _build_explanation(summary, metrics, alerts)
         return alerts, summary
 
     pattern_status = str(historical_signal.get("pattern_status", "unknown"))
@@ -76,6 +80,7 @@ def evaluate_window_risk(
             "records_evaluated": len(normalized_records),
             "window_key": metrics.get("window_key"),
         }
+        summary["explanation"] = _build_explanation(summary, metrics, alerts)
         return alerts, summary
 
     if pattern_reason in {"llm_activity_drop", "llm_quality_degradation", "system_activity_drop"}:
@@ -184,7 +189,63 @@ def evaluate_window_risk(
         "records_evaluated": len(normalized_records),
         "window_key": metrics.get("window_key"),
     }
+    summary["explanation"] = _build_explanation(summary, metrics, alerts)
     return alerts, summary
+
+
+def apply_baseline_shift_context(
+    raw_alerts: List[Dict[str, Any]],
+    risk_summary: Dict[str, Any],
+    recent_window_metrics: List[Dict[str, Any]],
+    min_consecutive_windows: int = 6,
+) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    if str(risk_summary.get("anomaly_reason", "")) != "llm_activity_drop":
+        return raw_alerts, risk_summary
+
+    current_window_key = str(risk_summary.get("window_key") or "")
+    consecutive_previous = 0
+    for window in recent_window_metrics:
+        if str(window.get("window_key") or "") == current_window_key:
+            continue
+        if int(float(window.get("total_records", 0) or 0)) <= 0:
+            continue
+        if str(window.get("anomaly_reason", "")) in BASELINE_SHIFT_REASONS:
+            consecutive_previous += 1
+            continue
+        break
+
+    if consecutive_previous + 1 < int(min_consecutive_windows):
+        return raw_alerts, risk_summary
+
+    updated_alerts = [
+        _alert(
+            "baseline_shift_candidate",
+            "medium",
+            10,
+            {
+                "reason": "repeated_llm_activity_drop",
+                "consecutive_windows": consecutive_previous + 1,
+                "previous_anomaly_reason": risk_summary.get("anomaly_reason"),
+                "top_signals": risk_summary.get("pattern_signals", [])[:3],
+            },
+        )
+    ]
+    updated_summary = dict(risk_summary)
+    updated_summary.update(
+        {
+            "threat_score": 10,
+            "attack_predicted": False,
+            "detection_count": len(updated_alerts),
+            "risk_level": "baseline_shift",
+            "anomaly_reason": "baseline_shift_candidate",
+            "baseline_shift_windows": consecutive_previous + 1,
+            "is_anomaly": False,
+            "anomaly_score": 0.0,
+            "anomaly_percentile": 0.0,
+        }
+    )
+    updated_summary["explanation"] = _build_explanation(updated_summary, updated_summary, updated_alerts)
+    return updated_alerts, updated_summary
 
 
 def _alert(alert_type: str, severity: str, score: int, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -194,6 +255,44 @@ def _alert(alert_type: str, severity: str, score: int, payload: Dict[str, Any]) 
         "score": int(score),
         "payload": payload,
     }
+
+
+def _build_explanation(
+    summary: Dict[str, Any],
+    metrics: Dict[str, Any],
+    alerts: List[Dict[str, Any]],
+) -> str:
+    reason = str(summary.get("anomaly_reason", "unknown"))
+    total_records = _as_int(metrics.get("total_records"))
+    llm_log_count = _as_int(metrics.get("llm_log_count"))
+    security_count = _as_int(metrics.get("security_count"))
+    system_error_rate = _as_float(metrics.get("system_error_rate"))
+    security_event_rate = _as_float(metrics.get("security_event_rate"))
+
+    if reason == "empty_window":
+        return "No records were available for this window, so the system did not score it as an attack."
+    if reason == "possible_incomplete_window":
+        return "Core log volumes dropped together, so this is treated as data quality or telemetry availability, not an attack."
+    if reason == "baseline_shift_candidate":
+        return "Repeated LLM volume drops suggest a possible baseline or pipeline shift; keep monitoring before treating this as a new normal."
+    if reason == "llm_activity_drop":
+        return (
+            f"LLM activity is far below historical baseline ({llm_log_count} LLM logs, {total_records} total records), "
+            "while security signals are not strong enough to classify this as an attack."
+        )
+    if reason == "llm_quality_degradation":
+        return "LLM error or timeout rates increased versus baseline, indicating service quality degradation rather than a confirmed attack."
+    if reason == "possible_attack_pattern":
+        top_alerts = ", ".join(str(alert.get("alert_type", "UNKNOWN")) for alert in alerts[:3])
+        return (
+            f"Security/system signals crossed attack thresholds "
+            f"(security_count={security_count}, security_rate={security_event_rate:.3f}, system_error_rate={system_error_rate:.3f}); "
+            f"top signals: {top_alerts}."
+        )
+    if alerts:
+        top_alerts = ", ".join(str(alert.get("alert_type", "UNKNOWN")) for alert in alerts[:3])
+        return f"An unusual pattern was detected but did not meet attack criteria; top signals: {top_alerts}."
+    return "No strong detection signals were found for this window."
 
 
 def _security_combination_alerts(

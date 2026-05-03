@@ -137,3 +137,40 @@ def build_window_metrics(
         "saved_at_utc": datetime.now(timezone.utc).isoformat(),
     }
     return metrics
+
+
+def build_window_drilldown(
+    normalized_records: List[Dict[str, Any]],
+    limit: int = 5,
+) -> Dict[str, Any]:
+    log_types = Counter(str(record.get("sap_function_log_type", "")).upper() for record in normalized_records)
+    system_records = [record for record in normalized_records if record.get("is_system_log", False)]
+    security_records = [
+        record
+        for record in normalized_records
+        if str(record.get("sap_function_log_type", "")).upper() == "SECURITY"
+    ]
+
+    return {
+        "top_log_types": _top_counts(log_types, limit),
+        "top_client_ips": _top_record_field(system_records, "client_ip", limit),
+        "top_services": _top_record_field(system_records, "service_id", limit),
+        "top_http_status_codes": _top_record_field(system_records, "http_status_code", limit),
+        "top_security_client_ips": _top_record_field(security_records, "client_ip", limit),
+        "top_security_services": _top_record_field(security_records, "service_id", limit),
+    }
+
+
+def _top_record_field(records: List[Dict[str, Any]], field: str, limit: int) -> List[Dict[str, Any]]:
+    counter = Counter(str(record.get(field)) for record in records if record.get(field) not in {None, ""})
+    return _top_counts(counter, limit)
+
+
+def _top_counts(counter: Counter, limit: int) -> List[Dict[str, Any]]:
+    return [
+        {
+            "value": value,
+            "count": count,
+        }
+        for value, count in counter.most_common(max(1, int(limit)))
+    ]

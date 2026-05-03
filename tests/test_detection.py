@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from backend.services.detection.detect import evaluate_window_risk
+from backend.services.detection.detect import apply_baseline_shift_context, evaluate_window_risk
 
 
 class DetectionTests(unittest.TestCase):
@@ -121,6 +121,59 @@ class DetectionTests(unittest.TestCase):
         self.assertFalse(summary["is_anomaly"])
         self.assertEqual(summary["risk_level"], "service_activity_anomaly")
         self.assertEqual(summary["anomaly_reason"], "llm_activity_drop")
+        self.assertIn("LLM activity", summary["explanation"])
+
+    def test_repeated_llm_activity_drop_becomes_baseline_shift_candidate(self) -> None:
+        alerts, summary = evaluate_window_risk(
+            normalized_records=[{"_id": "1"}],
+            metrics={
+                "window_key": "current-window",
+                "total_records": 3900,
+                "llm_log_count": 800,
+            },
+            model_signal={
+                "model_available": False,
+                "source": "insufficient_history:7",
+            },
+            historical_signal={
+                "historical_available": True,
+                "historical_source": "robust_z:58",
+                "pattern_status": "critical_anomaly",
+                "pattern_reason": "llm_activity_drop",
+                "pattern_score": 100.0,
+                "max_feature_deviation": 12.0,
+                "pattern_signals": [
+                    {
+                        "feature": "llm_log_count",
+                        "severity": "critical",
+                        "points": 25,
+                        "direction": "lower_than_usual",
+                    }
+                ],
+            },
+        )
+        recent_windows = [
+            {
+                "window_key": f"previous-{index}",
+                "total_records": 3900,
+                "anomaly_reason": "llm_activity_drop",
+            }
+            for index in range(5)
+        ]
+
+        updated_alerts, updated_summary = apply_baseline_shift_context(
+            raw_alerts=alerts,
+            risk_summary=summary,
+            recent_window_metrics=recent_windows,
+        )
+
+        self.assertEqual(len(updated_alerts), 1)
+        self.assertEqual(updated_alerts[0]["alert_type"], "BASELINE_SHIFT_CANDIDATE")
+        self.assertEqual(updated_summary["threat_score"], 10)
+        self.assertFalse(updated_summary["attack_predicted"])
+        self.assertEqual(updated_summary["risk_level"], "baseline_shift")
+        self.assertEqual(updated_summary["anomaly_reason"], "baseline_shift_candidate")
+        self.assertEqual(updated_summary["baseline_shift_windows"], 6)
 
     def test_llm_quality_degradation_emits_investigation_alert_not_attack(self) -> None:
         alerts, summary = evaluate_window_risk(

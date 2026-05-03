@@ -156,8 +156,16 @@ def _pattern_reason(signals: List[Dict[str, Any]]) -> str:
         if str(signal.get("direction")) == "higher_than_usual"
         and float(signal.get("abs_robust_z", 0.0)) >= 3.0
     }
+    very_strong_up_features = {
+        str(signal.get("feature"))
+        for signal in signals
+        if str(signal.get("direction")) == "higher_than_usual"
+        and float(signal.get("abs_robust_z", 0.0)) >= 4.0
+    }
 
-    if strong_up_features & SECURITY_ATTACK_UP_FEATURES:
+    attack_up_features = strong_up_features & SECURITY_ATTACK_UP_FEATURES
+    very_strong_attack_up_features = very_strong_up_features & SECURITY_ATTACK_UP_FEATURES
+    if very_strong_attack_up_features or len(attack_up_features) >= 2:
         return "possible_attack_pattern"
     if CORE_VOLUME_FEATURES.issubset(strong_down_features):
         return "possible_incomplete_window"

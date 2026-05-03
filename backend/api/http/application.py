@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException
 from backend.core.config import load_settings
 from backend.services.clients import SAPSOCClient
 from backend.services.detection import (
+    apply_baseline_shift_context,
     build_alert_submission_message,
     evaluate_window_risk,
     format_alert_events,
@@ -20,6 +21,7 @@ from backend.services.detection import (
     unavailable_model_signal,
 )
 from backend.services.ingestion import (
+    build_window_drilldown,
     build_window_metrics,
     ingest_result_to_dict,
     normalize_records,
@@ -72,6 +74,7 @@ def execute_ingestion_cycle() -> Dict[str, Any]:
         window_start=ingest_result.window_start,
         window_end=ingest_result.window_end,
     )
+    window_metrics["drilldown"] = build_window_drilldown(normalized)
     store.upsert_window_metrics(window_metrics)
     current_window_key = str(window_metrics.get("window_key") or "")
     history_rows = store.get_recent_window_features(limit=settings.model_history_limit)
@@ -104,6 +107,16 @@ def execute_ingestion_cycle() -> Dict[str, Any]:
         historical_signal=historical_signal,
         count_threshold=settings.error_security_threshold,
         attack_score_threshold=settings.attack_score_threshold,
+    )
+    recent_windows = [
+        row
+        for row in store.get_recent_window_metrics(limit=12)
+        if str(row.get("window_key") or "") != current_window_key
+    ]
+    raw_alerts, risk_summary = apply_baseline_shift_context(
+        raw_alerts=raw_alerts,
+        risk_summary=risk_summary,
+        recent_window_metrics=recent_windows,
     )
     window_metrics.update(risk_summary)
     window_metrics["run_id"] = run_id
@@ -250,8 +263,12 @@ def run_reprocess_windows(limit: int = 50, persist: bool = True) -> Dict[str, An
         windows = store.get_recent_window_metrics(limit=limit)
         feature_history = store.get_recent_window_features(limit=settings.model_history_limit)
         processed = []
+        processed_context = []
 
-        for window_metrics in windows:
+        for window_metrics in sorted(
+            windows,
+            key=lambda row: str(row.get("window_start") or row.get("saved_at_utc") or ""),
+        ):
             current_window_key = str(window_metrics.get("window_key") or "")
             history_rows = [
                 row
@@ -278,6 +295,11 @@ def run_reprocess_windows(limit: int = 50, persist: bool = True) -> Dict[str, An
                 count_threshold=settings.error_security_threshold,
                 attack_score_threshold=settings.attack_score_threshold,
             )
+            raw_alerts, risk_summary = apply_baseline_shift_context(
+                raw_alerts=raw_alerts,
+                risk_summary=risk_summary,
+                recent_window_metrics=list(reversed(processed_context)),
+            )
             updated_metrics = dict(window_metrics)
             updated_metrics.update(risk_summary)
 
@@ -296,12 +318,13 @@ def run_reprocess_windows(limit: int = 50, persist: bool = True) -> Dict[str, An
                     "alert_types": [alert.get("alert_type") for alert in raw_alerts],
                 }
             )
+            processed_context.append(updated_metrics)
 
         return {
             "status": "ok",
             "persisted": persist,
             "processed_count": len(processed),
-            "windows": processed,
+            "windows": list(reversed(processed)),
         }
     except Exception as exc:
         logger.exception("Historical window reprocess failed: %s", exc)
