@@ -70,6 +70,37 @@ class HistoricalBaselineTests(unittest.TestCase):
 
         self.assertEqual(reason, "possible_attack_pattern")
 
+    def test_llm_rate_spike_without_security_context_is_quality_degradation(self) -> None:
+        reason = _pattern_reason(
+            [
+                {
+                    "feature": "llm_timeout_rate",
+                    "direction": "higher_than_usual",
+                    "abs_robust_z": 5.0,
+                },
+            ]
+        )
+
+        self.assertEqual(reason, "llm_quality_degradation")
+
+    def test_llm_drop_with_rate_spike_stays_activity_drop(self) -> None:
+        reason = _pattern_reason(
+            [
+                {
+                    "feature": "llm_log_count",
+                    "direction": "lower_than_usual",
+                    "abs_robust_z": 12.0,
+                },
+                {
+                    "feature": "llm_timeout_rate",
+                    "direction": "higher_than_usual",
+                    "abs_robust_z": 5.0,
+                },
+            ]
+        )
+
+        self.assertEqual(reason, "llm_activity_drop")
+
 
 if __name__ == "__main__":
     unittest.main()
