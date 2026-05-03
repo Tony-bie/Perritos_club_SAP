@@ -324,6 +324,10 @@ http://localhost:8000
 | `/health/sap` | SAP SOC `/health` passthrough |
 | `/run/ingestion` | Trigger one full ingestion cycle now |
 | `/status/latest` | Get the latest ingestion run summary |
+| `/alerts/recent` | Read recent alert events for dashboards |
+| `/metrics/windows` | Read recent aggregated window metrics |
+| `/runs/recent` | Read recent ingestion runs |
+| `/dashboard/summary` | Aggregated dashboard summary (alerts, metrics, last run) |
 
 ### Storage Modes
 

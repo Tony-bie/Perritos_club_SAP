@@ -49,6 +49,18 @@ class BaseStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_recent_alerts(self, limit: int = 200) -> List[Dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_recent_ingest_runs(self, limit: int = 200) -> List[Dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_dashboard_summary(self, time_window_hours: int = 24) -> Dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
     def get_recent_window_features(self, limit: int = 200) -> List[Dict[str, Any]]:
         raise NotImplementedError
 
@@ -314,6 +326,99 @@ class SqliteStore(BaseStore):
                 (int(limit),),
             ).fetchall()
         return [json.loads(row["summary_json"]) for row in rows]
+
+    def get_recent_alerts(self, limit: int = 200) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT alert_id, run_id, detected_at_utc, alert_type, severity, payload
+                FROM alerts_events
+                ORDER BY detected_at_utc DESC
+                LIMIT ?
+                """,
+                (int(limit),),
+            ).fetchall()
+        alerts: List[Dict[str, Any]] = []
+        for row in rows:
+            alert = dict(row)
+            payload = alert.get("payload")
+            if isinstance(payload, str):
+                try:
+                    alert["payload"] = json.loads(payload)
+                except json.JSONDecodeError:
+                    pass
+            alerts.append(alert)
+        return alerts
+
+    def get_recent_ingest_runs(self, limit: int = 200) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT run_id, status, started_at_utc, ended_at_utc, duration_seconds,
+                       window_start, window_end, total_pages_expected, total_pages_fetched,
+                       total_records_info, total_records_fetched, error_message
+                FROM ingest_runs
+                ORDER BY started_at_utc DESC
+                LIMIT ?
+                """,
+                (int(limit),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_dashboard_summary(self, time_window_hours: int = 24) -> Dict[str, Any]:
+        with self._connect() as conn:
+            # Total alerts in time window
+            total_alerts_row = conn.execute(
+                """
+                SELECT COUNT(*) as count
+                FROM alerts_events
+                WHERE datetime(detected_at_utc) > datetime('now', '-' || ? || ' hours')
+                """,
+                (int(time_window_hours),),
+            ).fetchone()
+            total_alerts = total_alerts_row["count"] if total_alerts_row else 0
+            
+            # Alerts by severity
+            severity_rows = conn.execute(
+                """
+                SELECT severity, COUNT(*) as count
+                FROM alerts_events
+                WHERE datetime(detected_at_utc) > datetime('now', '-' || ? || ' hours')
+                GROUP BY severity
+                """,
+                (int(time_window_hours),),
+            ).fetchall()
+            alerts_by_severity = {row["severity"]: row["count"] for row in severity_rows}
+            
+            # Latest metrics
+            top_metrics_row = conn.execute(
+                """
+                SELECT summary_json
+                FROM window_metrics
+                ORDER BY saved_at_utc DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            top_metrics = json.loads(top_metrics_row["summary_json"]) if top_metrics_row else {}
+            
+            # Last run status
+            last_run_row = conn.execute(
+                """
+                SELECT run_id, status, started_at_utc, ended_at_utc, duration_seconds, error_message
+                FROM ingest_runs
+                ORDER BY started_at_utc DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            last_run = dict(last_run_row) if last_run_row else {}
+        
+        return {
+            "total_alerts": total_alerts,
+            "alerts_by_severity": alerts_by_severity,
+            "top_metrics": top_metrics,
+            "last_run": last_run,
+            "generated_at": datetime.utcnow().isoformat()
+        }
 
     def get_recent_window_features(self, limit: int = 200) -> List[Dict[str, Any]]:
         feature_columns = ", ".join(NUMERIC_FEATURE_COLUMNS)
@@ -741,6 +846,112 @@ class HanaStore(BaseStore):
             )
             rows = cursor.fetchall()
         return [json.loads(row[0]) for row in rows]
+
+    def get_recent_alerts(self, limit: int = 200) -> List[Dict[str, Any]]:
+        schema = self.settings.hana_schema
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f'''
+                SELECT ALERT_ID, RUN_ID, DETECTED_AT_UTC, ALERT_TYPE, SEVERITY, PAYLOAD
+                FROM "{schema}"."ALERTS_EVENTS"
+                ORDER BY DETECTED_AT_UTC DESC
+                LIMIT {int(limit)}
+                '''
+            )
+            rows = cursor.fetchall()
+            keys = [desc[0].lower() for desc in cursor.description]
+        alerts: List[Dict[str, Any]] = []
+        for row in rows:
+            alert = dict(zip(keys, row))
+            payload = alert.get("payload")
+            if isinstance(payload, str):
+                try:
+                    alert["payload"] = json.loads(payload)
+                except json.JSONDecodeError:
+                    pass
+            alerts.append(alert)
+        return alerts
+
+    def get_recent_ingest_runs(self, limit: int = 200) -> List[Dict[str, Any]]:
+        schema = self.settings.hana_schema
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f'''
+                SELECT RUN_ID, STATUS, STARTED_AT_UTC, ENDED_AT_UTC, DURATION_SECONDS,
+                       WINDOW_START, WINDOW_END, TOTAL_PAGES_EXPECTED, TOTAL_PAGES_FETCHED,
+                       TOTAL_RECORDS_INFO, TOTAL_RECORDS_FETCHED, ERROR_MESSAGE
+                FROM "{schema}"."INGEST_RUNS"
+                ORDER BY STARTED_AT_UTC DESC
+                LIMIT {int(limit)}
+                '''
+            )
+            rows = cursor.fetchall()
+            keys = [desc[0].lower() for desc in cursor.description]
+        return [dict(zip(keys, row)) for row in rows]
+
+    def get_dashboard_summary(self, time_window_hours: int = 24) -> Dict[str, Any]:
+        schema = self.settings.hana_schema
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            
+            # Total alerts in time window
+            cursor.execute(
+                f'''
+                SELECT COUNT(*) as count
+                FROM "{schema}"."ALERTS_EVENTS"
+                WHERE DETECTED_AT_UTC > ADD_SECONDS(CURRENT_TIMESTAMP, -{int(time_window_hours) * 3600})
+                '''
+            )
+            total_alerts = cursor.fetchone()[0] or 0
+            
+            # Alerts by severity
+            cursor.execute(
+                f'''
+                SELECT SEVERITY, COUNT(*) as count
+                FROM "{schema}"."ALERTS_EVENTS"
+                WHERE DETECTED_AT_UTC > ADD_SECONDS(CURRENT_TIMESTAMP, -{int(time_window_hours) * 3600})
+                GROUP BY SEVERITY
+                '''
+            )
+            alerts_by_severity = {row[0]: row[1] for row in cursor.fetchall()}
+            
+            # Latest metrics
+            cursor.execute(
+                f'''
+                SELECT SUMMARY_JSON
+                FROM "{schema}"."WINDOW_METRICS"
+                ORDER BY SAVED_AT_UTC DESC
+                LIMIT 1
+                '''
+            )
+            top_metrics_row = cursor.fetchone()
+            top_metrics = json.loads(top_metrics_row[0]) if top_metrics_row else {}
+            
+            # Last run status
+            cursor.execute(
+                f'''
+                SELECT RUN_ID, STATUS, STARTED_AT_UTC, ENDED_AT_UTC, DURATION_SECONDS, ERROR_MESSAGE
+                FROM "{schema}"."INGEST_RUNS"
+                ORDER BY STARTED_AT_UTC DESC
+                LIMIT 1
+                '''
+            )
+            last_run_row = cursor.fetchone()
+            if last_run_row:
+                keys = [desc[0].lower() for desc in cursor.description]
+                last_run = dict(zip(keys, last_run_row))
+            else:
+                last_run = {}
+        
+        return {
+            "total_alerts": total_alerts,
+            "alerts_by_severity": alerts_by_severity,
+            "top_metrics": top_metrics,
+            "last_run": last_run,
+            "generated_at": datetime.utcnow().isoformat()
+        }
 
     def get_recent_window_features(self, limit: int = 200) -> List[Dict[str, Any]]:
         schema = self.settings.hana_schema

@@ -6,7 +6,7 @@ import time
 from typing import Any, Dict
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel
 
 from backend.core.config import load_settings
@@ -55,6 +55,52 @@ _storage_status: Dict[str, Any] = {
 
 class CleanupRequest(BaseModel):
     retention_days: int = 90
+
+
+class RecentWindowMetricResponse(BaseModel):
+    window_key: str | None = None
+    window_start: str | None = None
+    window_end: str | None = None
+    total_records: int | None = None
+    threat_score: int | None = None
+    attack_predicted: bool | None = None
+    model_available: bool | None = None
+    is_anomaly: bool | None = None
+    anomaly_score: float | None = None
+    anomaly_percentile: float | None = None
+    saved_at_utc: str | None = None
+
+
+class RecentAlertResponse(BaseModel):
+    alert_id: str | None = None
+    run_id: str | None = None
+    detected_at_utc: str | None = None
+    alert_type: str | None = None
+    severity: str | None = None
+    payload: Dict[str, Any] | None = None
+
+
+class RecentIngestRunResponse(BaseModel):
+    run_id: str | None = None
+    status: str | None = None
+    started_at_utc: str | None = None
+    ended_at_utc: str | None = None
+    duration_seconds: float | None = None
+    window_start: str | None = None
+    window_end: str | None = None
+    total_pages_expected: int | None = None
+    total_pages_fetched: int | None = None
+    total_records_info: int | None = None
+    total_records_fetched: int | None = None
+    error_message: str | None = None
+
+
+class DashboardSummaryResponse(BaseModel):
+    total_alerts: int
+    alerts_by_severity: Dict[str, int]
+    top_metrics: Dict[str, Any]
+    last_run: Dict[str, Any]
+    generated_at: str
 
 
 def _require_admin_token(
@@ -277,6 +323,46 @@ def status_latest() -> Dict[str, Any]:
         "latest_run": latest,
         "latest_window_metrics": store.get_latest_window_metrics(),
     }
+
+
+@app.get("/alerts/recent", response_model=list[RecentAlertResponse])
+def alerts_recent(limit: int = Query(default=50, ge=1, le=200)) -> list[Dict[str, Any]]:
+    if not _storage_status["ready"]:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Storage backend unavailable: {_storage_status['error'] or 'unknown error'}",
+        )
+    return store.get_recent_alerts(limit=limit)
+
+
+@app.get("/metrics/windows", response_model=list[RecentWindowMetricResponse])
+def metrics_windows(limit: int = Query(default=50, ge=1, le=200)) -> list[Dict[str, Any]]:
+    if not _storage_status["ready"]:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Storage backend unavailable: {_storage_status['error'] or 'unknown error'}",
+        )
+    return store.get_recent_window_metrics(limit=limit)
+
+
+@app.get("/runs/recent", response_model=list[RecentIngestRunResponse])
+def runs_recent(limit: int = Query(default=20, ge=1, le=200)) -> list[Dict[str, Any]]:
+    if not _storage_status["ready"]:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Storage backend unavailable: {_storage_status['error'] or 'unknown error'}",
+        )
+    return store.get_recent_ingest_runs(limit=limit)
+
+
+@app.get("/dashboard/summary", response_model=DashboardSummaryResponse)
+def dashboard_summary(time_window_hours: int = Query(default=24, ge=1, le=720)) -> Dict[str, Any]:
+    if not _storage_status["ready"]:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Storage backend unavailable: {_storage_status['error'] or 'unknown error'}",
+        )
+    return store.get_dashboard_summary(time_window_hours=time_window_hours)
 
 
 @app.post("/api/admin/cleanup")
