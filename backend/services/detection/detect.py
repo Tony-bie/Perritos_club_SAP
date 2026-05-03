@@ -78,7 +78,7 @@ def evaluate_window_risk(
         }
         return alerts, summary
 
-    if pattern_reason in {"llm_activity_drop", "system_activity_drop"}:
+    if pattern_reason in {"llm_activity_drop", "llm_quality_degradation", "system_activity_drop"}:
         max_feature_deviation = float(historical_signal.get("max_feature_deviation", 0.0) or 0.0)
         severity = "high" if max_feature_deviation >= 8.0 else "medium"
         score = 20 if severity == "high" else 10
@@ -160,7 +160,7 @@ def evaluate_window_risk(
     summary_risk_level = pattern_status
     if has_security_combination and pattern_reason in {"unknown", "insufficient_history", "general_pattern_break"}:
         summary_reason = "security_correlation"
-    if pattern_reason in {"llm_activity_drop", "system_activity_drop"}:
+    if pattern_reason in {"llm_activity_drop", "llm_quality_degradation", "system_activity_drop"}:
         summary_risk_level = "service_activity_anomaly"
     if has_security_combination and pattern_status in {"unknown", "normal"}:
         summary_risk_level = "security_correlation"

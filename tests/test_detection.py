@@ -122,6 +122,42 @@ class DetectionTests(unittest.TestCase):
         self.assertEqual(summary["risk_level"], "service_activity_anomaly")
         self.assertEqual(summary["anomaly_reason"], "llm_activity_drop")
 
+    def test_llm_quality_degradation_emits_investigation_alert_not_attack(self) -> None:
+        alerts, summary = evaluate_window_risk(
+            normalized_records=[{"_id": "1"}],
+            metrics={
+                "window_key": "llm-quality-window",
+                "total_records": 5400,
+            },
+            model_signal={
+                "model_available": False,
+                "source": "insufficient_history:7",
+            },
+            historical_signal={
+                "historical_available": True,
+                "historical_source": "robust_z:58",
+                "pattern_status": "high_anomaly",
+                "pattern_reason": "llm_quality_degradation",
+                "pattern_score": 25.0,
+                "max_feature_deviation": 5.0,
+                "pattern_signals": [
+                    {
+                        "feature": "llm_timeout_rate",
+                        "severity": "high",
+                        "points": 15,
+                        "direction": "higher_than_usual",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0]["alert_type"], "LLM_QUALITY_DEGRADATION")
+        self.assertEqual(summary["threat_score"], 10)
+        self.assertFalse(summary["attack_predicted"])
+        self.assertEqual(summary["risk_level"], "service_activity_anomaly")
+        self.assertEqual(summary["anomaly_reason"], "llm_quality_degradation")
+
     def test_common_security_cooccurrence_does_not_predict_attack_without_context(self) -> None:
         alerts, summary = evaluate_window_risk(
             normalized_records=[{"_id": "1"}],

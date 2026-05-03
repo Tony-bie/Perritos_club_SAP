@@ -725,5 +725,6 @@ def _should_train_on_window(metrics: Dict[str, Any]) -> bool:
         "empty_window",
         "possible_incomplete_window",
         "llm_activity_drop",
+        "llm_quality_degradation",
         "system_activity_drop",
     }
