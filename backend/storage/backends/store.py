@@ -22,6 +22,10 @@ class BaseStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def bulk_upsert_raw_logs(self, records: List[Dict[str, Any]], batch_size: int = 1000) -> int:
+        raise NotImplementedError
+
+    @abstractmethod
     def insert_ingest_run(self, ingest_run: Dict[str, Any]) -> None:
         raise NotImplementedError
 
@@ -38,7 +42,23 @@ class BaseStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def bulk_upsert_window_metrics(self, records: List[Dict[str, Any]], batch_size: int = 1000) -> int:
+        raise NotImplementedError
+
+    @abstractmethod
     def get_recent_window_metrics(self, limit: int = 200) -> List[Dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_recent_alerts(self, limit: int = 200) -> List[Dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_recent_ingest_runs(self, limit: int = 200) -> List[Dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_dashboard_summary(self, time_window_hours: int = 24) -> Dict[str, Any]:
         raise NotImplementedError
 
     @abstractmethod
@@ -47,6 +67,10 @@ class BaseStore(ABC):
 
     @abstractmethod
     def get_latest_window_metrics(self) -> Optional[Dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def call_cleanup_procedure(self, retention_days: int = 90) -> Dict[str, Any]:
         raise NotImplementedError
 
 
@@ -168,6 +192,16 @@ class SqliteStore(BaseStore):
             conn.commit()
         return upserted
 
+    def bulk_upsert_raw_logs(self, records: List[Dict[str, Any]], batch_size: int = 1000) -> int:
+        if not records:
+            return 0
+
+        total = 0
+        step = max(1, int(batch_size))
+        for start in range(0, len(records), step):
+            total += self.upsert_raw_logs(records[start:start + step])
+        return total
+
     def insert_ingest_run(self, ingest_run: Dict[str, Any]) -> None:
         with self._connect() as conn:
             conn.execute(
@@ -283,6 +317,19 @@ class SqliteStore(BaseStore):
                 )
             conn.commit()
 
+    def bulk_upsert_window_metrics(self, records: List[Dict[str, Any]], batch_size: int = 1000) -> int:
+        if not records:
+            return 0
+
+        total = 0
+        step = max(1, int(batch_size))
+        for start in range(0, len(records), step):
+            batch = records[start:start + step]
+            for metrics in batch:
+                self.upsert_window_metrics(metrics)
+                total += 1
+        return total
+
     def get_recent_window_metrics(self, limit: int = 200) -> List[Dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -295,6 +342,99 @@ class SqliteStore(BaseStore):
                 (int(limit),),
             ).fetchall()
         return [json.loads(row["summary_json"]) for row in rows]
+
+    def get_recent_alerts(self, limit: int = 200) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT alert_id, run_id, detected_at_utc, alert_type, severity, payload
+                FROM alerts_events
+                ORDER BY detected_at_utc DESC
+                LIMIT ?
+                """,
+                (int(limit),),
+            ).fetchall()
+        alerts: List[Dict[str, Any]] = []
+        for row in rows:
+            alert = dict(row)
+            payload = alert.get("payload")
+            if isinstance(payload, str):
+                try:
+                    alert["payload"] = json.loads(payload)
+                except json.JSONDecodeError:
+                    pass
+            alerts.append(alert)
+        return alerts
+
+    def get_recent_ingest_runs(self, limit: int = 200) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT run_id, status, started_at_utc, ended_at_utc, duration_seconds,
+                       window_start, window_end, total_pages_expected, total_pages_fetched,
+                       total_records_info, total_records_fetched, error_message
+                FROM ingest_runs
+                ORDER BY started_at_utc DESC
+                LIMIT ?
+                """,
+                (int(limit),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_dashboard_summary(self, time_window_hours: int = 24) -> Dict[str, Any]:
+        with self._connect() as conn:
+            # Total alerts in time window
+            total_alerts_row = conn.execute(
+                """
+                SELECT COUNT(*) as count
+                FROM alerts_events
+                WHERE datetime(detected_at_utc) > datetime('now', '-' || ? || ' hours')
+                """,
+                (int(time_window_hours),),
+            ).fetchone()
+            total_alerts = total_alerts_row["count"] if total_alerts_row else 0
+            
+            # Alerts by severity
+            severity_rows = conn.execute(
+                """
+                SELECT severity, COUNT(*) as count
+                FROM alerts_events
+                WHERE datetime(detected_at_utc) > datetime('now', '-' || ? || ' hours')
+                GROUP BY severity
+                """,
+                (int(time_window_hours),),
+            ).fetchall()
+            alerts_by_severity = {row["severity"]: row["count"] for row in severity_rows}
+            
+            # Latest metrics
+            top_metrics_row = conn.execute(
+                """
+                SELECT summary_json
+                FROM window_metrics
+                ORDER BY saved_at_utc DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            top_metrics = json.loads(top_metrics_row["summary_json"]) if top_metrics_row else {}
+            
+            # Last run status
+            last_run_row = conn.execute(
+                """
+                SELECT run_id, status, started_at_utc, ended_at_utc, duration_seconds, error_message
+                FROM ingest_runs
+                ORDER BY started_at_utc DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            last_run = dict(last_run_row) if last_run_row else {}
+        
+        return {
+            "total_alerts": total_alerts,
+            "alerts_by_severity": alerts_by_severity,
+            "top_metrics": top_metrics,
+            "last_run": last_run,
+            "generated_at": datetime.utcnow().isoformat()
+        }
 
     def get_recent_window_features(self, limit: int = 200) -> List[Dict[str, Any]]:
         feature_columns = ", ".join(NUMERIC_FEATURE_COLUMNS)
@@ -314,6 +454,39 @@ class SqliteStore(BaseStore):
     def get_latest_window_metrics(self) -> Optional[Dict[str, Any]]:
         results = self.get_recent_window_metrics(limit=1)
         return results[0] if results else None
+
+    def call_cleanup_procedure(self, retention_days: int = 90) -> Dict[str, Any]:
+        cutoff = datetime.utcnow().timestamp() - (max(1, int(retention_days)) * 86400)
+        cutoff_iso = datetime.utcfromtimestamp(cutoff).isoformat()
+
+        deleted_counts: Dict[str, int] = {}
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            for table_name, column_name, key in (
+                ("alerts_events", "detected_at_utc", "alerts_events"),
+                ("window_metrics", "window_start", "window_metrics"),
+                ("raw_logs", "log_ts", "raw_logs"),
+            ):
+                cursor.execute(
+                    f'DELETE FROM {table_name} WHERE {column_name} < ?',
+                    (cutoff_iso,),
+                )
+                deleted_counts[key] = cursor.rowcount if cursor.rowcount is not None else 0
+
+            try:
+                cursor.execute("DELETE FROM ingest_runs WHERE ended_at_utc < ?", (cutoff_iso,))
+                deleted_counts["ingest_runs"] = cursor.rowcount if cursor.rowcount is not None else 0
+            except sqlite3.OperationalError:
+                deleted_counts["ingest_runs"] = 0
+            conn.commit()
+
+        return {
+            "status": "cleaned",
+            "retention_days": max(1, int(retention_days)),
+            "rows_deleted": sum(deleted_counts.values()),
+            "deleted_counts": deleted_counts,
+            "cutoff_utc": cutoff_iso,
+        }
 
     @staticmethod
     def _fallback_id(record: Dict[str, Any]) -> str:
@@ -511,6 +684,40 @@ class HanaStore(BaseStore):
             conn.commit()
         return upserted
 
+    def bulk_upsert_raw_logs(self, records: List[Dict[str, Any]], batch_size: int = 1000) -> int:
+        if not records:
+            return 0
+
+        schema = self.settings.hana_schema
+        total = 0
+        step = max(1, int(batch_size))
+        statement = (
+            f'UPSERT "{schema}"."RAW_LOGS" '
+            '(LOG_ID, LOG_TS, PAYLOAD, IS_LLM_LOG, IS_SYSTEM_LOG, INGESTED_AT) '
+            'VALUES (?, ?, ?, ?, ?, ?) WITH PRIMARY KEY'
+        )
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            for start in range(0, len(records), step):
+                batch = records[start:start + step]
+                params = []
+                for record in batch:
+                    log_id = str(record.get("_id") or SqliteStore._fallback_id(record))
+                    params.append(
+                        (
+                            log_id,
+                            record.get("@timestamp"),
+                            json.dumps(record, ensure_ascii=True),
+                            int(bool(record.get("is_llm_log", False))),
+                            int(bool(record.get("is_system_log", False))),
+                            record.get("ingested_at") or datetime.utcnow().isoformat(),
+                        )
+                    )
+                cursor.executemany(statement, params)
+                total += len(batch)
+            conn.commit()
+        return total
+
     def insert_ingest_run(self, ingest_run: Dict[str, Any]) -> None:
         schema = self.settings.hana_schema
         with self._connection() as conn:
@@ -658,6 +865,19 @@ class HanaStore(BaseStore):
                 )
             conn.commit()
 
+    def bulk_upsert_window_metrics(self, records: List[Dict[str, Any]], batch_size: int = 1000) -> int:
+        if not records:
+            return 0
+
+        total = 0
+        step = max(1, int(batch_size))
+        for start in range(0, len(records), step):
+            batch = records[start:start + step]
+            for metrics in batch:
+                self.upsert_window_metrics(metrics)
+                total += 1
+        return total
+
     def get_recent_window_metrics(self, limit: int = 200) -> List[Dict[str, Any]]:
         schema = self.settings.hana_schema
         with self._connection() as conn:
@@ -672,6 +892,112 @@ class HanaStore(BaseStore):
             )
             rows = cursor.fetchall()
         return [json.loads(row[0]) for row in rows]
+
+    def get_recent_alerts(self, limit: int = 200) -> List[Dict[str, Any]]:
+        schema = self.settings.hana_schema
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f'''
+                SELECT ALERT_ID, RUN_ID, DETECTED_AT_UTC, ALERT_TYPE, SEVERITY, PAYLOAD
+                FROM "{schema}"."ALERTS_EVENTS"
+                ORDER BY DETECTED_AT_UTC DESC
+                LIMIT {int(limit)}
+                '''
+            )
+            rows = cursor.fetchall()
+            keys = [desc[0].lower() for desc in cursor.description]
+        alerts: List[Dict[str, Any]] = []
+        for row in rows:
+            alert = dict(zip(keys, row))
+            payload = alert.get("payload")
+            if isinstance(payload, str):
+                try:
+                    alert["payload"] = json.loads(payload)
+                except json.JSONDecodeError:
+                    pass
+            alerts.append(alert)
+        return alerts
+
+    def get_recent_ingest_runs(self, limit: int = 200) -> List[Dict[str, Any]]:
+        schema = self.settings.hana_schema
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f'''
+                SELECT RUN_ID, STATUS, STARTED_AT_UTC, ENDED_AT_UTC, DURATION_SECONDS,
+                       WINDOW_START, WINDOW_END, TOTAL_PAGES_EXPECTED, TOTAL_PAGES_FETCHED,
+                       TOTAL_RECORDS_INFO, TOTAL_RECORDS_FETCHED, ERROR_MESSAGE
+                FROM "{schema}"."INGEST_RUNS"
+                ORDER BY STARTED_AT_UTC DESC
+                LIMIT {int(limit)}
+                '''
+            )
+            rows = cursor.fetchall()
+            keys = [desc[0].lower() for desc in cursor.description]
+        return [dict(zip(keys, row)) for row in rows]
+
+    def get_dashboard_summary(self, time_window_hours: int = 24) -> Dict[str, Any]:
+        schema = self.settings.hana_schema
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            
+            # Total alerts in time window
+            cursor.execute(
+                f'''
+                SELECT COUNT(*) as count
+                FROM "{schema}"."ALERTS_EVENTS"
+                WHERE DETECTED_AT_UTC > ADD_SECONDS(CURRENT_TIMESTAMP, -{int(time_window_hours) * 3600})
+                '''
+            )
+            total_alerts = cursor.fetchone()[0] or 0
+            
+            # Alerts by severity
+            cursor.execute(
+                f'''
+                SELECT SEVERITY, COUNT(*) as count
+                FROM "{schema}"."ALERTS_EVENTS"
+                WHERE DETECTED_AT_UTC > ADD_SECONDS(CURRENT_TIMESTAMP, -{int(time_window_hours) * 3600})
+                GROUP BY SEVERITY
+                '''
+            )
+            alerts_by_severity = {row[0]: row[1] for row in cursor.fetchall()}
+            
+            # Latest metrics
+            cursor.execute(
+                f'''
+                SELECT SUMMARY_JSON
+                FROM "{schema}"."WINDOW_METRICS"
+                ORDER BY SAVED_AT_UTC DESC
+                LIMIT 1
+                '''
+            )
+            top_metrics_row = cursor.fetchone()
+            top_metrics = json.loads(top_metrics_row[0]) if top_metrics_row else {}
+            
+            # Last run status
+            cursor.execute(
+                f'''
+                SELECT RUN_ID, STATUS, STARTED_AT_UTC, ENDED_AT_UTC, DURATION_SECONDS, ERROR_MESSAGE
+                FROM "{schema}"."INGEST_RUNS"
+                ORDER BY STARTED_AT_UTC DESC
+                LIMIT 1
+                '''
+            )
+            last_run_row = cursor.fetchone()
+            if last_run_row:
+                keys = [desc[0].lower() for desc in cursor.description]
+                last_run = dict(zip(keys, last_run_row))
+            else:
+                last_run = {}
+        
+        return {
+            "total_alerts": total_alerts,
+            "alerts_by_severity": alerts_by_severity,
+            "top_metrics": top_metrics,
+            "last_run": last_run,
+            "generated_at": datetime.utcnow().isoformat()
+        }
 
     def get_recent_window_features(self, limit: int = 200) -> List[Dict[str, Any]]:
         schema = self.settings.hana_schema
@@ -694,6 +1020,36 @@ class HanaStore(BaseStore):
     def get_latest_window_metrics(self) -> Optional[Dict[str, Any]]:
         results = self.get_recent_window_metrics(limit=1)
         return results[0] if results else None
+
+    def call_cleanup_procedure(self, retention_days: int = 90) -> Dict[str, Any]:
+        schema = self.settings.hana_schema
+        retention_days = max(1, int(retention_days))
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f'CALL "{schema}"."sp_cleanup_old_data"(p_retention_days => {retention_days})')
+
+            deleted_counts: Dict[str, int] = {}
+            try:
+                cursor.execute(
+                    f'SELECT TOP 50 "DETAILS" FROM "{schema}"."AUDIT_LOG" ORDER BY "TIMESTAMP" DESC'
+                )
+                rows = cursor.fetchall()
+                details = [row[0] for row in rows]
+            except Exception:
+                details = []
+
+        rows_deleted = 0
+        for detail in details:
+            if detail.startswith("Deleted "):
+                parts = detail.split()
+                if len(parts) >= 3 and parts[1].isdigit():
+                    rows_deleted += int(parts[1])
+        return {
+            "status": "cleaned",
+            "retention_days": int(retention_days),
+            "rows_deleted": rows_deleted,
+            "deleted_counts": deleted_counts,
+        }
 
     @staticmethod
     def _ensure_hana_column(cursor: Any, schema: str, table_name: str, column_name: str, column_type: str) -> None:

@@ -6,7 +6,8 @@ import time
 from typing import Any, Dict
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from pydantic import BaseModel
 
 from backend.core.config import load_settings
 from backend.services.clients import SAPSOCClient
@@ -68,6 +69,74 @@ router = Router(name= __name__)
 dp = Dispatcher() 
 dp.include_router(router)
 
+class CleanupRequest(BaseModel):
+    retention_days: int = 90
+
+
+class RecentWindowMetricResponse(BaseModel):
+    window_key: str | None = None
+    window_start: str | None = None
+    window_end: str | None = None
+    total_records: int | None = None
+    threat_score: int | None = None
+    attack_predicted: bool | None = None
+    model_available: bool | None = None
+    is_anomaly: bool | None = None
+    anomaly_score: float | None = None
+    anomaly_percentile: float | None = None
+    saved_at_utc: str | None = None
+
+
+class RecentAlertResponse(BaseModel):
+    alert_id: str | None = None
+    run_id: str | None = None
+    detected_at_utc: str | None = None
+    alert_type: str | None = None
+    severity: str | None = None
+    payload: Dict[str, Any] | None = None
+
+
+class RecentIngestRunResponse(BaseModel):
+    run_id: str | None = None
+    status: str | None = None
+    started_at_utc: str | None = None
+    ended_at_utc: str | None = None
+    duration_seconds: float | None = None
+    window_start: str | None = None
+    window_end: str | None = None
+    total_pages_expected: int | None = None
+    total_pages_fetched: int | None = None
+    total_records_info: int | None = None
+    total_records_fetched: int | None = None
+    error_message: str | None = None
+
+
+class DashboardSummaryResponse(BaseModel):
+    total_alerts: int
+    alerts_by_severity: Dict[str, int]
+    top_metrics: Dict[str, Any]
+    last_run: Dict[str, Any]
+    generated_at: str
+
+
+def _require_admin_token(
+    authorization: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None),
+) -> None:
+    expected_token = settings.admin_api_key or settings.sap_soc_token
+    if not expected_token:
+        raise HTTPException(status_code=503, detail="Admin auth is not configured")
+
+    provided_token = ""
+    if authorization and authorization.startswith("Bearer "):
+        provided_token = authorization.removeprefix("Bearer ").strip()
+    elif x_api_key:
+        provided_token = x_api_key.strip()
+
+    if provided_token != expected_token:
+        raise HTTPException(status_code=403, detail="Invalid admin token")
+
+
 def execute_ingestion_cycle() -> Dict[str, Any]:
     run_id = str(uuid4())
     ingest_result, records = run_ingestion_cycle(client, run_id=run_id)
@@ -82,13 +151,12 @@ def execute_ingestion_cycle() -> Dict[str, Any]:
         }
 
     normalized = normalize_records(records)
-    upserted = store.upsert_raw_logs(normalized)
+    upserted = store.bulk_upsert_raw_logs(normalized, batch_size=settings.batch_size)
     window_metrics = build_window_metrics(
         normalized_records=normalized,
         window_start=ingest_result.window_start,
         window_end=ingest_result.window_end,
     )
-    store.upsert_window_metrics(window_metrics)
     current_window_key = str(window_metrics.get("window_key") or "")
     history_rows = store.get_recent_window_features(limit=settings.model_history_limit)
     history_rows = [
@@ -123,7 +191,7 @@ def execute_ingestion_cycle() -> Dict[str, Any]:
     )
     window_metrics.update(risk_summary)
     window_metrics["run_id"] = run_id
-    store.upsert_window_metrics(window_metrics)
+    store.bulk_upsert_window_metrics([window_metrics], batch_size=settings.batch_size)
     alert_events = format_alert_events(raw_alerts, run_id=run_id)
     alerts_inserted = store.insert_alerts(alert_events)
     submitted_alert_response: Dict[str, Any] | None = None
@@ -358,6 +426,63 @@ async def last_status_telegram(message: Message):
         await bot.send_message(chat_id=message.chat.id, text=str(result))
     else:
         await message.answer("No tienes permiso para usar este comando.")
+
+@app.get("/alerts/recent", response_model=list[RecentAlertResponse])
+def alerts_recent(limit: int = Query(default=50, ge=1, le=200)) -> list[Dict[str, Any]]:
+    if not _storage_status["ready"]:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Storage backend unavailable: {_storage_status['error'] or 'unknown error'}",
+        )
+    return store.get_recent_alerts(limit=limit)
+
+
+@app.get("/metrics/windows", response_model=list[RecentWindowMetricResponse])
+def metrics_windows(limit: int = Query(default=50, ge=1, le=200)) -> list[Dict[str, Any]]:
+    if not _storage_status["ready"]:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Storage backend unavailable: {_storage_status['error'] or 'unknown error'}",
+        )
+    return store.get_recent_window_metrics(limit=limit)
+
+
+@app.get("/runs/recent", response_model=list[RecentIngestRunResponse])
+def runs_recent(limit: int = Query(default=20, ge=1, le=200)) -> list[Dict[str, Any]]:
+    if not _storage_status["ready"]:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Storage backend unavailable: {_storage_status['error'] or 'unknown error'}",
+        )
+    return store.get_recent_ingest_runs(limit=limit)
+
+
+@app.get("/dashboard/summary", response_model=DashboardSummaryResponse)
+def dashboard_summary(time_window_hours: int = Query(default=24, ge=1, le=720)) -> Dict[str, Any]:
+    if not _storage_status["ready"]:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Storage backend unavailable: {_storage_status['error'] or 'unknown error'}",
+        )
+    return store.get_dashboard_summary(time_window_hours=time_window_hours)
+
+
+@app.post("/api/admin/cleanup")
+def admin_cleanup(
+    payload: CleanupRequest,
+    _: None = Depends(_require_admin_token),
+) -> Dict[str, Any]:
+    if not _storage_status["ready"]:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Storage backend unavailable: {_storage_status['error'] or 'unknown error'}",
+        )
+
+    try:
+        return store.call_cleanup_procedure(retention_days=payload.retention_days)
+    except Exception as exc:
+        logger.exception("Cleanup failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 async def run() -> None:
