@@ -28,6 +28,15 @@ from backend.services.ingestion import (
 )
 from backend.storage import create_store
 
+from aiogram import Bot, Router, Dispatcher
+from aiogram.types import Message
+
+from aiogram.filters import Command
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+
+import asyncio
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
@@ -44,6 +53,10 @@ client = SAPSOCClient(
     retry_backoff_seconds=settings.retry_backoff_seconds,
 )
 
+token = settings.token_bot_telegram
+chat_ids = settings.chat_ids
+bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+
 app = FastAPI(title="SAP SOC Backend", version="0.1.0")
 _stop_event = threading.Event()
 _worker_thread: threading.Thread | None = None
@@ -52,6 +65,9 @@ _storage_status: Dict[str, Any] = {
     "error": None,
 }
 
+router = Router(name= __name__)
+dp = Dispatcher() 
+dp.include_router(router)
 
 class CleanupRequest(BaseModel):
     retention_days: int = 90
@@ -272,8 +288,8 @@ def on_shutdown() -> None:
 
 
 @app.get("/health")
-def health() -> Dict[str, Any]:
-    return {
+async def health() -> Dict[str, Any]:
+    status = {
         "status": "ok" if _storage_status["ready"] else "degraded",
         "worker_enabled": settings.enable_worker,
         "worker_running": bool(_worker_thread and _worker_thread.is_alive()),
@@ -282,7 +298,16 @@ def health() -> Dict[str, Any]:
         "storage_error": _storage_status["error"],
         "model_enabled": settings.model_enabled,
     }
+    return status
 
+@router.message(Command("health"))
+async def health_telegram(message: Message):
+    result = await health()
+    if message.chat.id in chat_ids:
+        await bot.send_message(chat_id=message.chat.id, text=str(result))
+    else:
+        await message.answer("No tienes permiso para usar este comando.")
+    
 
 @app.get("/health/sap")
 def health_sap() -> Dict[str, Any]:
@@ -394,6 +419,13 @@ def status_latest() -> Dict[str, Any]:
         "latest_window_metrics": store.get_latest_window_metrics(),
     }
 
+@router.message(Command("last_status"))
+async def last_status_telegram(message: Message):
+    result =  status_latest()
+    if message.chat.id in chat_ids:
+        await bot.send_message(chat_id=message.chat.id, text=str(result))
+    else:
+        await message.answer("No tienes permiso para usar este comando.")
 
 @app.get("/alerts/recent", response_model=list[RecentAlertResponse])
 def alerts_recent(limit: int = Query(default=50, ge=1, le=200)) -> list[Dict[str, Any]]:
@@ -453,10 +485,16 @@ def admin_cleanup(
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-def run() -> None:
+async def run() -> None:
     import uvicorn
 
-    uvicorn.run(app, host=settings.app_host, port=settings.app_port, reload=False)
+    config = uvicorn.Config(app, host=settings.app_host, port=settings.app_port, reload=False)
+    server = uvicorn.Server(config)
+
+    await asyncio.gather(
+        dp.start_polling(bot),
+        server.serve()       
+    )
 
 
 if __name__ == "__main__":

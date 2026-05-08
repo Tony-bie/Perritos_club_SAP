@@ -98,6 +98,8 @@ class Settings:
     retention_days: int
     cleanup_schedule_enabled: bool
     cleanup_schedule_hour: int
+    token_bot_telegram : str
+    chat_ids : list
 
 
 def _clean_str(value: str | None, default: str = "") -> str:
@@ -302,4 +304,6 @@ def load_settings() -> Settings:
         retention_days=max(7, _to_int(_getenv("RETENTION_DAYS", default="90"), 90)),
         cleanup_schedule_enabled=_to_bool(_getenv("CLEANUP_SCHEDULE_ENABLED", default="true"), True),
         cleanup_schedule_hour=max(0, min(23, _to_int(_getenv("CLEANUP_SCHEDULE_HOUR", default="2"), 2))),
+        token_bot_telegram=(_getenv("TOKEN_BOT_TELEGRAM")),
+        chat_ids=[int(x) for x in _getenv("CHAT_IDS", default="").split(",") if x],
     )

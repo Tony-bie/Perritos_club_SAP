@@ -35,15 +35,18 @@ SYSTEM_ACTIVITY_DOWN_FEATURES = {
     "http_5xx_count",
 }
 
-ATTACK_UP_FEATURES = {
+SECURITY_ATTACK_UP_FEATURES = {
     "security_count",
     "security_event_rate",
     "http_5xx_count",
     "system_error_rate",
-    "llm_error_rate",
-    "llm_timeout_rate",
     "top_ip_event_share",
     "max_events_from_single_ip",
+}
+
+LLM_DEGRADATION_UP_FEATURES = {
+    "llm_error_rate",
+    "llm_timeout_rate",
 }
 
 
@@ -154,12 +157,14 @@ def _pattern_reason(signals: List[Dict[str, Any]]) -> str:
         and float(signal.get("abs_robust_z", 0.0)) >= 3.0
     }
 
-    if strong_up_features & ATTACK_UP_FEATURES:
+    if strong_up_features & SECURITY_ATTACK_UP_FEATURES:
         return "possible_attack_pattern"
     if CORE_VOLUME_FEATURES.issubset(strong_down_features):
         return "possible_incomplete_window"
     if strong_down_features & LLM_ACTIVITY_DOWN_FEATURES:
         return "llm_activity_drop"
+    if strong_up_features & LLM_DEGRADATION_UP_FEATURES:
+        return "llm_quality_degradation"
     if strong_down_features & SYSTEM_ACTIVITY_DOWN_FEATURES:
         return "system_activity_drop"
     if strong_up_features:
