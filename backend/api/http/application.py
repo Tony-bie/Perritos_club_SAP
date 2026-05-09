@@ -55,7 +55,14 @@ client = SAPSOCClient(
 
 token = settings.token_bot_telegram
 chat_ids = settings.chat_ids
-bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+bot: Bot | None = None
+if token:
+    try:
+        bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    except Exception as exc:
+        logger.warning("Telegram bot disabled due to invalid token: %s", exc)
+else:
+    logger.info("Telegram bot disabled: TOKEN_BOT_TELEGRAM is not configured")
 
 app = FastAPI(title="SAP SOC Backend", version="0.1.0")
 _stop_event = threading.Event()
@@ -303,6 +310,9 @@ async def health() -> Dict[str, Any]:
 @router.message(Command("health"))
 async def health_telegram(message: Message):
     result = await health()
+    if bot is None:
+        await message.answer("Telegram bot no esta configurado en este entorno.")
+        return
     if message.chat.id in chat_ids:
         await bot.send_message(chat_id=message.chat.id, text=str(result))
     else:
@@ -422,6 +432,9 @@ def status_latest() -> Dict[str, Any]:
 @router.message(Command("last_status"))
 async def last_status_telegram(message: Message):
     result =  status_latest()
+    if bot is None:
+        await message.answer("Telegram bot no esta configurado en este entorno.")
+        return
     if message.chat.id in chat_ids:
         await bot.send_message(chat_id=message.chat.id, text=str(result))
     else:
@@ -491,11 +504,11 @@ async def run() -> None:
     config = uvicorn.Config(app, host=settings.app_host, port=settings.app_port, reload=False)
     server = uvicorn.Server(config)
 
-    await asyncio.gather(
-        dp.start_polling(bot),
-        server.serve()       
-    )
+    tasks = [server.serve()]
+    if bot is not None:
+        tasks.append(dp.start_polling(bot))
+    await asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":
-    run()
+    asyncio.run(run())
