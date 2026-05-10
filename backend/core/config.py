@@ -1,7 +1,6 @@
 import json
 import os
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -139,7 +138,6 @@ def _to_float(value: str | None, default: float) -> float:
         return default
 
 
-@lru_cache(maxsize=1)
 def _get_vcap_hana_credentials() -> dict[str, str]:
     raw_services = os.getenv("VCAP_SERVICES")
     if not raw_services:
@@ -254,6 +252,9 @@ def _resolve_poll_interval_minutes() -> int:
 
 
 def load_settings() -> Settings:
+    db_user = _clean_str(os.getenv("DB_USER"))
+    db_password = _clean_str(os.getenv("DB_PASSWORD"))
+
     return Settings(
         sap_soc_base_url=_getenv("SAP_SOC_BASE_URL", default="").rstrip("/"),
         sap_soc_token=_getenv("SAP_SOC_TOKEN", default=""),
@@ -272,8 +273,8 @@ def load_settings() -> Settings:
         sqlite_path=_getenv("SQLITE_PATH", default="./pipeline.db"),
         hana_host=_get_hana_value("HANA_HOST", "SAP_HANA_HOST", "DB_HOST", default=""),
         hana_port=_to_int(_get_hana_value("HANA_PORT", "SAP_HANA_PORT", "DB_PORT", default="443"), 443),
-        hana_user=_get_hana_value("HANA_USER", "SAP_HANA_USER", "DB_USER", default=""),
-        hana_password=_get_hana_value("HANA_PASSWORD", "SAP_HANA_PASSWORD", "DB_PASSWORD", default=""),
+        hana_user=db_user or _get_hana_value("HANA_USER", "SAP_HANA_USER", default=""),
+        hana_password=db_password or _get_hana_value("HANA_PASSWORD", "SAP_HANA_PASSWORD", default=""),
         hana_token=_get_hana_value("HANA_TOKEN", default=""),
         hana_schema=_get_hana_value("HANA_SCHEMA", "SAP_HANA_SCHEMA", default="SOC_PIPELINE"),
         hana_encrypt=_to_bool(_get_hana_value("HANA_ENCRYPT", "SAP_HANA_ENCRYPT", default="true"), True),
