@@ -28,12 +28,20 @@ from backend.services.ingestion import (
 )
 from backend.storage import create_store
 
-from aiogram import Bot, Router, Dispatcher
-from aiogram.types import Message
-
-from aiogram.filters import Command
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
+try:
+    from aiogram import Bot, Dispatcher, Router
+    from aiogram.client.default import DefaultBotProperties
+    from aiogram.enums import ParseMode
+    from aiogram.filters import Command
+    from aiogram.types import Message
+except ModuleNotFoundError:
+    Bot = None
+    Dispatcher = None
+    Router = None
+    DefaultBotProperties = None
+    ParseMode = None
+    Command = None
+    Message = Any
 
 import asyncio
 
@@ -55,7 +63,11 @@ client = SAPSOCClient(
 
 token = settings.token_bot_telegram
 chat_ids = settings.chat_ids
-bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+bot = (
+    Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    if Bot and token
+    else None
+)
 
 app = FastAPI(title="SAP SOC Backend", version="0.1.0")
 _stop_event = threading.Event()
@@ -65,9 +77,10 @@ _storage_status: Dict[str, Any] = {
     "error": None,
 }
 
-router = Router(name= __name__)
-dp = Dispatcher() 
-dp.include_router(router)
+router = Router(name=__name__) if Router else None
+dp = Dispatcher() if Dispatcher else None
+if dp and router:
+    dp.include_router(router)
 
 class CleanupRequest(BaseModel):
     retention_days: int = 90
@@ -298,15 +311,19 @@ async def health() -> Dict[str, Any]:
         "storage_error": _storage_status["error"],
         "model_enabled": settings.model_enabled,
     }
+    fallback_status = store.get_fallback_status()
+    if fallback_status.get("enabled"):
+        status["fallback"] = fallback_status
     return status
 
-@router.message(Command("health"))
-async def health_telegram(message: Message):
-    result = await health()
-    if message.chat.id in chat_ids:
-        await bot.send_message(chat_id=message.chat.id, text=str(result))
-    else:
-        await message.answer("No tienes permiso para usar este comando.")
+if router and Command:
+    @router.message(Command("health"))
+    async def health_telegram(message: Message):
+        result = await health()
+        if message.chat.id in chat_ids and bot:
+            await bot.send_message(chat_id=message.chat.id, text=str(result))
+        else:
+            await message.answer("No tienes permiso para usar este comando.")
     
 
 @app.get("/health/sap")
@@ -413,19 +430,46 @@ def status_latest() -> Dict[str, Any]:
     latest = store.get_last_run()
     if not latest:
         return {"status": "no-runs-yet"}
-    return {
+    response = {
         "status": "ok",
         "latest_run": latest,
         "latest_window_metrics": store.get_latest_window_metrics(),
     }
+    fallback_status = store.get_fallback_status()
+    if fallback_status.get("enabled"):
+        response["fallback"] = fallback_status
+    return response
 
-@router.message(Command("last_status"))
-async def last_status_telegram(message: Message):
-    result =  status_latest()
-    if message.chat.id in chat_ids:
-        await bot.send_message(chat_id=message.chat.id, text=str(result))
-    else:
-        await message.answer("No tienes permiso para usar este comando.")
+
+@app.post("/run/resync-fallback")
+def run_resync_fallback(_: None = Depends(_require_admin_token)) -> Dict[str, Any]:
+    if not _storage_status["ready"]:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Storage backend unavailable: {_storage_status['error'] or 'unknown error'}",
+        )
+
+    fallback_status = store.get_fallback_status()
+    if not fallback_status.get("enabled"):
+        return {
+            "status": "not_enabled",
+            "message": "Fallback sync is only available when HANA uses SQLite fallback storage.",
+        }
+
+    try:
+        return store.sync_fallback_to_primary()
+    except Exception as exc:
+        logger.exception("Fallback resync failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+if router and Command:
+    @router.message(Command("last_status"))
+    async def last_status_telegram(message: Message):
+        result = status_latest()
+        if message.chat.id in chat_ids and bot:
+            await bot.send_message(chat_id=message.chat.id, text=str(result))
+        else:
+            await message.answer("No tienes permiso para usar este comando.")
 
 @app.get("/alerts/recent", response_model=list[RecentAlertResponse])
 def alerts_recent(limit: int = Query(default=50, ge=1, le=200)) -> list[Dict[str, Any]]:
@@ -490,11 +534,13 @@ async def run() -> None:
 
     config = uvicorn.Config(app, host=settings.app_host, port=settings.app_port, reload=False)
     server = uvicorn.Server(config)
-
-    await asyncio.gather(
-        dp.start_polling(bot),
-        server.serve()       
-    )
+    if dp and bot:
+        await asyncio.gather(
+            dp.start_polling(bot),
+            server.serve(),
+        )
+        return
+    await server.serve()
 
 
 if __name__ == "__main__":

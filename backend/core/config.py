@@ -254,6 +254,7 @@ def _resolve_poll_interval_minutes() -> int:
 
 
 def load_settings() -> Settings:
+    _get_vcap_hana_credentials.cache_clear()
     return Settings(
         sap_soc_base_url=_getenv("SAP_SOC_BASE_URL", default="").rstrip("/"),
         sap_soc_token=_getenv("SAP_SOC_TOKEN", default=""),

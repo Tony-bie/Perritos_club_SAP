@@ -73,6 +73,19 @@ class BaseStore(ABC):
     def call_cleanup_procedure(self, retention_days: int = 90) -> Dict[str, Any]:
         raise NotImplementedError
 
+    def sync_fallback_to_primary(self) -> Dict[str, Any]:
+        return {
+            "status": "not_supported",
+            "synced_counts": {},
+            "pending_counts": {},
+        }
+
+    def get_fallback_status(self) -> Dict[str, Any]:
+        return {
+            "enabled": False,
+            "pending_counts": {},
+        }
+
 
 class SqliteStore(BaseStore):
     def __init__(self, sqlite_path: str) -> None:
@@ -488,6 +501,83 @@ class SqliteStore(BaseStore):
             "cutoff_utc": cutoff_iso,
         }
 
+    def export_raw_logs(self) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT log_id, payload
+                FROM raw_logs
+                ORDER BY ingested_at ASC
+                """
+            ).fetchall()
+        return [json.loads(str(row["payload"])) for row in rows]
+
+    def export_ingest_runs(self) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT run_id, status, started_at_utc, ended_at_utc, duration_seconds,
+                       window_start, window_end, total_pages_expected, total_pages_fetched,
+                       total_records_info, total_records_fetched, error_message
+                FROM ingest_runs
+                ORDER BY started_at_utc ASC
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def export_alerts(self) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT alert_id, run_id, detected_at_utc, alert_type, severity, payload
+                FROM alerts_events
+                ORDER BY detected_at_utc ASC
+                """
+            ).fetchall()
+        alerts: List[Dict[str, Any]] = []
+        for row in rows:
+            alert = dict(row)
+            payload = alert.get("payload")
+            if isinstance(payload, str):
+                alert["payload"] = json.loads(payload)
+            alerts.append(alert)
+        return alerts
+
+    def export_window_metrics(self) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT summary_json
+                FROM window_metrics
+                ORDER BY saved_at_utc ASC
+                """
+            ).fetchall()
+        return [json.loads(str(row["summary_json"])) for row in rows]
+
+    def delete_raw_logs(self, log_ids: List[str]) -> int:
+        return self._delete_by_ids("raw_logs", "log_id", log_ids)
+
+    def delete_ingest_runs(self, run_ids: List[str]) -> int:
+        return self._delete_by_ids("ingest_runs", "run_id", run_ids)
+
+    def delete_alerts(self, alert_ids: List[str]) -> int:
+        return self._delete_by_ids("alerts_events", "alert_id", alert_ids)
+
+    def delete_window_metrics(self, window_keys: List[str]) -> int:
+        deleted = self._delete_by_ids("window_metrics", "window_key", window_keys)
+        if window_keys:
+            self._delete_by_ids("window_features", "window_key", window_keys)
+        return deleted
+
+    def get_pending_counts(self) -> Dict[str, int]:
+        with self._connect() as conn:
+            return {
+                "raw_logs": int(conn.execute("SELECT COUNT(*) FROM raw_logs").fetchone()[0]),
+                "ingest_runs": int(conn.execute("SELECT COUNT(*) FROM ingest_runs").fetchone()[0]),
+                "alerts_events": int(conn.execute("SELECT COUNT(*) FROM alerts_events").fetchone()[0]),
+                "window_metrics": int(conn.execute("SELECT COUNT(*) FROM window_metrics").fetchone()[0]),
+            }
+
     @staticmethod
     def _fallback_id(record: Dict[str, Any]) -> str:
         payload = json.dumps(record, sort_keys=True, ensure_ascii=True)
@@ -501,6 +591,19 @@ class SqliteStore(BaseStore):
         }
         if column_name.lower() not in columns:
             conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+
+    def _delete_by_ids(self, table_name: str, column_name: str, ids: List[str]) -> int:
+        if not ids:
+            return 0
+
+        placeholders = ", ".join("?" for _ in ids)
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"DELETE FROM {table_name} WHERE {column_name} IN ({placeholders})",
+                tuple(ids),
+            )
+            conn.commit()
+            return cursor.rowcount if cursor.rowcount is not None else 0
 
 
 class HanaStore(BaseStore):
@@ -1068,9 +1171,167 @@ class HanaStore(BaseStore):
             cursor.execute(f'ALTER TABLE "{schema}"."{table_name}" ADD ("{column_name}" {column_type})')
 
 
+class ResilientStore(BaseStore):
+    def __init__(self, primary: BaseStore, fallback: SqliteStore) -> None:
+        self.primary = primary
+        self.fallback = fallback
+        self.primary_available = False
+        self.last_primary_error: str | None = None
+        self.last_fallback_write_utc: str | None = None
+
+    def ensure_schema(self) -> None:
+        self.fallback.ensure_schema()
+        try:
+            self.primary.ensure_schema()
+            self.primary_available = True
+            self.last_primary_error = None
+        except Exception as exc:
+            self.primary_available = False
+            self.last_primary_error = str(exc)
+
+    def upsert_raw_logs(self, records: List[Dict[str, Any]]) -> int:
+        return self._write_with_fallback("upsert_raw_logs", records)
+
+    def bulk_upsert_raw_logs(self, records: List[Dict[str, Any]], batch_size: int = 1000) -> int:
+        return self._write_with_fallback("bulk_upsert_raw_logs", records, batch_size=batch_size)
+
+    def insert_ingest_run(self, ingest_run: Dict[str, Any]) -> None:
+        self._write_with_fallback("insert_ingest_run", ingest_run)
+
+    def insert_alerts(self, alerts: List[Dict[str, Any]]) -> int:
+        return self._write_with_fallback("insert_alerts", alerts)
+
+    def get_last_run(self) -> Optional[Dict[str, Any]]:
+        return self._read_with_fallback("get_last_run")
+
+    def upsert_window_metrics(self, metrics: Dict[str, Any]) -> None:
+        self._write_with_fallback("upsert_window_metrics", metrics)
+
+    def bulk_upsert_window_metrics(self, records: List[Dict[str, Any]], batch_size: int = 1000) -> int:
+        return self._write_with_fallback("bulk_upsert_window_metrics", records, batch_size=batch_size)
+
+    def get_recent_window_metrics(self, limit: int = 200) -> List[Dict[str, Any]]:
+        return self._read_with_fallback("get_recent_window_metrics", limit=limit)
+
+    def get_recent_alerts(self, limit: int = 200) -> List[Dict[str, Any]]:
+        return self._read_with_fallback("get_recent_alerts", limit=limit)
+
+    def get_recent_ingest_runs(self, limit: int = 200) -> List[Dict[str, Any]]:
+        return self._read_with_fallback("get_recent_ingest_runs", limit=limit)
+
+    def get_dashboard_summary(self, time_window_hours: int = 24) -> Dict[str, Any]:
+        return self._read_with_fallback("get_dashboard_summary", time_window_hours=time_window_hours)
+
+    def get_recent_window_features(self, limit: int = 200) -> List[Dict[str, Any]]:
+        return self._read_with_fallback("get_recent_window_features", limit=limit)
+
+    def get_latest_window_metrics(self) -> Optional[Dict[str, Any]]:
+        return self._read_with_fallback("get_latest_window_metrics")
+
+    def call_cleanup_procedure(self, retention_days: int = 90) -> Dict[str, Any]:
+        primary_result: Dict[str, Any] | None = None
+        primary_error: str | None = None
+        try:
+            primary_result = self.primary.call_cleanup_procedure(retention_days=retention_days)
+            self.primary_available = True
+            self.last_primary_error = None
+        except Exception as exc:
+            self.primary_available = False
+            self.last_primary_error = str(exc)
+            primary_error = str(exc)
+        fallback_result = self.fallback.call_cleanup_procedure(retention_days=retention_days)
+        return {
+            "status": "ok" if primary_error is None else "fallback_only",
+            "primary": primary_result,
+            "primary_error": primary_error,
+            "fallback": fallback_result,
+        }
+
+    def sync_fallback_to_primary(self) -> Dict[str, Any]:
+        self.primary.ensure_schema()
+
+        synced_counts = {
+            "raw_logs": 0,
+            "ingest_runs": 0,
+            "alerts_events": 0,
+            "window_metrics": 0,
+        }
+
+        ingest_runs = self.fallback.export_ingest_runs()
+        for ingest_run in ingest_runs:
+            self.primary.insert_ingest_run(ingest_run)
+        synced_counts["ingest_runs"] = self.fallback.delete_ingest_runs(
+            [str(row.get("run_id")) for row in ingest_runs if row.get("run_id")]
+        )
+
+        raw_logs = self.fallback.export_raw_logs()
+        synced_counts["raw_logs"] = self.primary.bulk_upsert_raw_logs(raw_logs, batch_size=1000)
+        self.fallback.delete_raw_logs(
+            [str(row.get("_id") or SqliteStore._fallback_id(row)) for row in raw_logs]
+        )
+
+        window_metrics = self.fallback.export_window_metrics()
+        synced_counts["window_metrics"] = self.primary.bulk_upsert_window_metrics(window_metrics, batch_size=250)
+        self.fallback.delete_window_metrics(
+            [str(row.get("window_key")) for row in window_metrics if row.get("window_key")]
+        )
+
+        alerts = self.fallback.export_alerts()
+        synced_counts["alerts_events"] = self.primary.insert_alerts(alerts)
+        self.fallback.delete_alerts(
+            [str(row.get("alert_id")) for row in alerts if row.get("alert_id")]
+        )
+
+        self.primary_available = True
+        self.last_primary_error = None
+
+        return {
+            "status": "ok",
+            "synced_counts": synced_counts,
+            "pending_counts": self.fallback.get_pending_counts(),
+        }
+
+    def get_fallback_status(self) -> Dict[str, Any]:
+        return {
+            "enabled": True,
+            "primary_backend": self.primary.__class__.__name__,
+            "fallback_backend": self.fallback.__class__.__name__,
+            "primary_available": self.primary_available,
+            "last_primary_error": self.last_primary_error,
+            "last_fallback_write_utc": self.last_fallback_write_utc,
+            "pending_counts": self.fallback.get_pending_counts(),
+        }
+
+    def _read_with_fallback(self, method_name: str, **kwargs: Any) -> Any:
+        try:
+            result = getattr(self.primary, method_name)(**kwargs)
+            self.primary_available = True
+            self.last_primary_error = None
+            return result
+        except Exception as exc:
+            self.primary_available = False
+            self.last_primary_error = str(exc)
+            return getattr(self.fallback, method_name)(**kwargs)
+
+    def _write_with_fallback(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
+        try:
+            result = getattr(self.primary, method_name)(*args, **kwargs)
+            self.primary_available = True
+            self.last_primary_error = None
+            return result
+        except Exception as exc:
+            self.primary_available = False
+            self.last_primary_error = str(exc)
+            self.last_fallback_write_utc = datetime.now().isoformat()
+            return getattr(self.fallback, method_name)(*args, **kwargs)
+
+
 def create_store(settings: Settings) -> BaseStore:
     if settings.storage_backend == "hana":
-        return HanaStore(settings)
+        return ResilientStore(
+            primary=HanaStore(settings),
+            fallback=SqliteStore(settings.sqlite_path),
+        )
     return SqliteStore(settings.sqlite_path)
 
 
