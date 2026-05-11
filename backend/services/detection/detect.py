@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 
+BASELINE_SHIFT_REASONS = {"llm_activity_drop", "baseline_shift_candidate"}
+ANOMALOUS_PATTERN_STATUSES = {"suspicious", "high_anomaly", "critical_anomaly"}
 def evaluate_window_risk(
     normalized_records: List[Dict[str, Any]],
     metrics: Dict[str, Any],
@@ -31,10 +33,14 @@ def evaluate_window_risk(
             "anomaly_score": 0.0,
             "anomaly_percentile": 0.0,
             "is_anomaly": False,
+            "model_is_anomaly": bool(model_signal.get("is_anomaly", False)),
+            "model_anomaly_score": float(model_signal.get("anomaly_score", 0.0) or 0.0),
+            "model_anomaly_percentile": float(model_signal.get("anomaly_percentile", 0.0) or 0.0),
             "model_source": model_signal.get("source", "unavailable"),
             "records_evaluated": len(normalized_records),
             "window_key": metrics.get("window_key"),
         }
+        summary["explanation"] = _build_explanation(summary, alerts)
         return alerts, summary
 
     pattern_status = str(historical_signal.get("pattern_status", "unknown"))
@@ -57,6 +63,15 @@ def evaluate_window_risk(
                 },
             )
         )
+        anomaly_fields = _derive_window_anomaly_fields(
+            model_signal=model_signal,
+            historical_signal=historical_signal,
+            threat_score=score,
+            detection_count=len(alerts),
+            attack_predicted=False,
+            risk_level="data_quality",
+            anomaly_reason=pattern_reason,
+        )
         summary = {
             "threat_score": score,
             "attack_predicted": False,
@@ -69,13 +84,12 @@ def evaluate_window_risk(
             "max_feature_deviation": max_feature_deviation,
             "pattern_signals": historical_signal.get("pattern_signals", []),
             "model_available": bool(model_signal.get("model_available", False)),
-            "anomaly_score": 0.0,
-            "anomaly_percentile": 0.0,
-            "is_anomaly": False,
             "model_source": model_signal.get("source", "unavailable"),
             "records_evaluated": len(normalized_records),
             "window_key": metrics.get("window_key"),
+            **anomaly_fields,
         }
+        summary["explanation"] = _build_explanation(summary, alerts)
         return alerts, summary
 
     if pattern_reason in {"llm_activity_drop", "llm_quality_degradation", "system_activity_drop"}:
@@ -165,6 +179,16 @@ def evaluate_window_risk(
     if has_security_combination and pattern_status in {"unknown", "normal"}:
         summary_risk_level = "security_correlation"
 
+    anomaly_fields = _derive_window_anomaly_fields(
+        model_signal=model_signal,
+        historical_signal=historical_signal,
+        threat_score=threat_score,
+        detection_count=len(alerts),
+        attack_predicted=attack_predicted,
+        risk_level=summary_risk_level,
+        anomaly_reason=summary_reason,
+    )
+
     summary = {
         "threat_score": threat_score,
         "attack_predicted": attack_predicted,
@@ -177,14 +201,94 @@ def evaluate_window_risk(
         "max_feature_deviation": float(historical_signal.get("max_feature_deviation", 0.0) or 0.0),
         "pattern_signals": historical_signal.get("pattern_signals", []),
         "model_available": model_available,
-        "anomaly_score": float(model_signal.get("anomaly_score", 0.0) or 0.0),
-        "anomaly_percentile": anomaly_percentile,
-        "is_anomaly": is_model_anomaly,
         "model_source": model_signal.get("source", "unavailable"),
         "records_evaluated": len(normalized_records),
         "window_key": metrics.get("window_key"),
+        **anomaly_fields,
     }
+    summary["explanation"] = _build_explanation(summary, alerts)
     return alerts, summary
+
+
+def apply_baseline_shift_context(
+    raw_alerts: List[Dict[str, Any]],
+    risk_summary: Dict[str, Any],
+    recent_window_metrics: List[Dict[str, Any]],
+    min_consecutive_windows: int = 6,
+) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    if str(risk_summary.get("anomaly_reason", "")) != "llm_activity_drop":
+        return raw_alerts, risk_summary
+
+    current_window_key = str(risk_summary.get("window_key") or "")
+    consecutive_previous = 0
+    for window in recent_window_metrics:
+        if str(window.get("window_key") or "") == current_window_key:
+            continue
+        if int(float(window.get("total_records", 0) or 0)) <= 0:
+            continue
+        if str(window.get("anomaly_reason", "")) in BASELINE_SHIFT_REASONS:
+            consecutive_previous += 1
+            continue
+        break
+
+    if consecutive_previous + 1 < int(min_consecutive_windows):
+        return raw_alerts, risk_summary
+
+    updated_alerts = [
+        _alert(
+            "baseline_shift_candidate",
+            "medium",
+            10,
+            {
+                "reason": "repeated_llm_activity_drop",
+                "consecutive_windows": consecutive_previous + 1,
+                "previous_anomaly_reason": risk_summary.get("anomaly_reason"),
+                "top_signals": risk_summary.get("pattern_signals", [])[:3],
+            },
+        )
+    ]
+    updated_summary = dict(risk_summary)
+    updated_summary.update(
+        {
+            "threat_score": 10,
+            "attack_predicted": False,
+            "detection_count": len(updated_alerts),
+            "risk_level": "baseline_shift",
+            "anomaly_reason": "baseline_shift_candidate",
+            "baseline_shift_windows": consecutive_previous + 1,
+            "is_anomaly": True,
+            "anomaly_score": 10.0,
+            "anomaly_percentile": 10.0,
+        }
+    )
+    updated_summary["explanation"] = _build_explanation(updated_summary, updated_alerts)
+    return updated_alerts, updated_summary
+
+
+def _build_explanation(summary: Dict[str, Any], alerts: List[Dict[str, Any]]) -> str:
+    anomaly_reason = str(summary.get("anomaly_reason", "unknown"))
+    threat_score = int(float(summary.get("threat_score", 0) or 0))
+
+    if anomaly_reason == "empty_window":
+        return "Empty window received; no alerts generated."
+
+    if anomaly_reason == "possible_incomplete_window":
+        return f"Incomplete window detected with threat score {threat_score} and {len(alerts)} alert(s)."
+
+    if anomaly_reason == "llm_activity_drop":
+        return f"LLM activity drop detected with threat score {threat_score} and {len(alerts)} alert(s)."
+
+    if anomaly_reason == "llm_quality_degradation":
+        return f"LLM quality degradation detected with threat score {threat_score} and {len(alerts)} alert(s)."
+
+    if anomaly_reason == "system_activity_drop":
+        return f"System activity drop detected with threat score {threat_score} and {len(alerts)} alert(s)."
+
+    if anomaly_reason == "baseline_shift_candidate":
+        windows = int(float(summary.get("baseline_shift_windows", 0) or 0))
+        return f"Repeated LLM activity drops suggest a baseline shift after {windows} window(s)."
+
+    return f"{anomaly_reason.replace('_', ' ').strip().capitalize()} detected with threat score {threat_score} and {len(alerts)} alert(s)."
 
 
 def _alert(alert_type: str, severity: str, score: int, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -306,6 +410,61 @@ def _security_combination_alerts(
 
 def _has_security_combination_alert(alerts: List[Dict[str, Any]]) -> bool:
     return any(str(alert.get("alert_type", "")).startswith("SECURITY_") for alert in alerts)
+
+
+def _derive_window_anomaly_fields(
+    model_signal: Dict[str, Any],
+    historical_signal: Dict[str, Any],
+    threat_score: int,
+    detection_count: int,
+    attack_predicted: bool,
+    risk_level: str,
+    anomaly_reason: str,
+) -> Dict[str, Any]:
+    model_is_anomaly = bool(model_signal.get("is_anomaly", False))
+    model_score = _as_float(model_signal.get("anomaly_score"))
+    model_percentile = _as_float(model_signal.get("anomaly_percentile"))
+    pattern_score = _as_float(historical_signal.get("pattern_score"))
+    pattern_status = str(historical_signal.get("pattern_status", "unknown"))
+
+    historical_is_anomaly = (
+        bool(historical_signal.get("historical_available", False))
+        and pattern_status in ANOMALOUS_PATTERN_STATUSES
+        and anomaly_reason not in {"empty_window", "insufficient_history"}
+    )
+    rule_is_anomaly = bool(attack_predicted or detection_count > 0 or int(threat_score) > 0)
+    is_anomaly = bool(model_is_anomaly or historical_is_anomaly or rule_is_anomaly)
+
+    if risk_level in {"no_data", "unknown"} and anomaly_reason in {"empty_window", "insufficient_history"}:
+        is_anomaly = bool(model_is_anomaly and risk_level != "no_data")
+
+    model_signal_score = model_percentile if model_percentile > 0.0 else min(100.0, model_score)
+    anomaly_score = max(
+        0.0,
+        min(100.0, model_signal_score),
+        min(100.0, pattern_score),
+        min(100.0, float(threat_score)),
+    )
+    anomaly_percentile = max(
+        0.0,
+        min(100.0, model_percentile),
+        min(100.0, pattern_score),
+        min(100.0, float(threat_score)),
+    )
+
+    if is_anomaly and anomaly_score <= 0.0:
+        anomaly_score = max(1.0, min(100.0, float(threat_score) or pattern_score or model_signal_score))
+    if is_anomaly and anomaly_percentile <= 0.0:
+        anomaly_percentile = anomaly_score
+
+    return {
+        "is_anomaly": is_anomaly,
+        "anomaly_score": anomaly_score,
+        "anomaly_percentile": anomaly_percentile,
+        "model_is_anomaly": model_is_anomaly,
+        "model_anomaly_score": model_score,
+        "model_anomaly_percentile": model_percentile,
+    }
 
 
 def _as_int(value: Any) -> int:
