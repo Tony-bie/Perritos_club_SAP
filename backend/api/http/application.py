@@ -63,11 +63,14 @@ client = SAPSOCClient(
 
 token = settings.token_bot_telegram
 chat_ids = settings.chat_ids
-bot = (
-    Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    if Bot and token
-    else None
-)
+bot: Bot | None = None
+if Bot and DefaultBotProperties and ParseMode and token:
+    try:
+        bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    except Exception as exc:
+        logger.warning("Telegram bot disabled due to invalid token: %s", exc)
+else:
+    logger.info("Telegram bot disabled: TOKEN_BOT_TELEGRAM is not configured")
 
 app = FastAPI(title="SAP SOC Backend", version="0.1.0")
 _stop_event = threading.Event()
@@ -320,7 +323,10 @@ if router and Command:
     @router.message(Command("health"))
     async def health_telegram(message: Message):
         result = await health()
-        if message.chat.id in chat_ids and bot:
+        if bot is None:
+            await message.answer("Telegram bot no esta configurado en este entorno.")
+            return
+        if message.chat.id in chat_ids:
             await bot.send_message(chat_id=message.chat.id, text=str(result))
         else:
             await message.answer("No tienes permiso para usar este comando.")
@@ -357,7 +363,8 @@ def run_reprocess_windows(limit: int = 50, persist: bool = True) -> Dict[str, An
         )
 
     try:
-        windows = store.get_recent_window_metrics(limit=limit)
+        effective_limit = 1_000_000 if int(limit) <= 0 else int(limit)
+        windows = store.get_recent_window_metrics(limit=effective_limit)
         feature_history = store.get_recent_window_features(limit=settings.model_history_limit)
         processed = []
 
@@ -373,11 +380,29 @@ def run_reprocess_windows(limit: int = 50, persist: bool = True) -> Dict[str, An
                 history_rows=history_rows,
                 min_history_rows=max(20, settings.model_min_training_rows),
             )
+            model_available = bool(window_metrics.get("model_available", False))
             model_signal = {
-                "model_available": bool(window_metrics.get("model_available", False)),
-                "is_anomaly": bool(window_metrics.get("is_anomaly", False)),
-                "anomaly_score": float(window_metrics.get("anomaly_score", 0.0) or 0.0),
-                "anomaly_percentile": float(window_metrics.get("anomaly_percentile", 0.0) or 0.0),
+                "model_available": model_available,
+                "is_anomaly": bool(
+                    window_metrics.get(
+                        "model_is_anomaly",
+                        window_metrics.get("is_anomaly", False) if model_available else False,
+                    )
+                ),
+                "anomaly_score": float(
+                    window_metrics.get(
+                        "model_anomaly_score",
+                        window_metrics.get("anomaly_score", 0.0) if model_available else 0.0,
+                    )
+                    or 0.0
+                ),
+                "anomaly_percentile": float(
+                    window_metrics.get(
+                        "model_anomaly_percentile",
+                        window_metrics.get("anomaly_percentile", 0.0) if model_available else 0.0,
+                    )
+                    or 0.0
+                ),
                 "source": "historical_reprocess_existing_model_state",
             }
             raw_alerts, risk_summary = evaluate_window_risk(
@@ -400,6 +425,9 @@ def run_reprocess_windows(limit: int = 50, persist: bool = True) -> Dict[str, An
                     "total_records": updated_metrics.get("total_records", 0),
                     "threat_score": updated_metrics.get("threat_score", 0),
                     "detection_count": updated_metrics.get("detection_count", 0),
+                    "is_anomaly": updated_metrics.get("is_anomaly", False),
+                    "anomaly_score": updated_metrics.get("anomaly_score", 0.0),
+                    "anomaly_percentile": updated_metrics.get("anomaly_percentile", 0.0),
                     "attack_predicted": updated_metrics.get("attack_predicted", False),
                     "anomaly_reason": updated_metrics.get("anomaly_reason"),
                     "risk_level": updated_metrics.get("risk_level"),
@@ -410,6 +438,8 @@ def run_reprocess_windows(limit: int = 50, persist: bool = True) -> Dict[str, An
         return {
             "status": "ok",
             "persisted": persist,
+            "requested_limit": limit,
+            "effective_limit": effective_limit,
             "processed_count": len(processed),
             "windows": processed,
         }
@@ -466,7 +496,10 @@ if router and Command:
     @router.message(Command("last_status"))
     async def last_status_telegram(message: Message):
         result = status_latest()
-        if message.chat.id in chat_ids and bot:
+        if bot is None:
+            await message.answer("Telegram bot no esta configurado en este entorno.")
+            return
+        if message.chat.id in chat_ids:
             await bot.send_message(chat_id=message.chat.id, text=str(result))
         else:
             await message.answer("No tienes permiso para usar este comando.")
@@ -534,14 +567,12 @@ async def run() -> None:
 
     config = uvicorn.Config(app, host=settings.app_host, port=settings.app_port, reload=False)
     server = uvicorn.Server(config)
-    if dp and bot:
-        await asyncio.gather(
-            dp.start_polling(bot),
-            server.serve(),
-        )
-        return
-    await server.serve()
+
+    tasks = [server.serve()]
+    if dp is not None and bot is not None:
+        tasks.append(dp.start_polling(bot))
+    await asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":
-    run()
+    asyncio.run(run())

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from backend.services.detection.detect import evaluate_window_risk
+from backend.services.detection.detect import apply_baseline_shift_context, evaluate_window_risk
 
 
 class DetectionTests(unittest.TestCase):
@@ -79,7 +79,9 @@ class DetectionTests(unittest.TestCase):
         self.assertEqual(summary["threat_score"], 20)
         self.assertEqual(summary["detection_count"], 1)
         self.assertFalse(summary["attack_predicted"])
-        self.assertFalse(summary["is_anomaly"])
+        self.assertTrue(summary["is_anomaly"])
+        self.assertEqual(summary["anomaly_score"], 100.0)
+        self.assertEqual(summary["anomaly_percentile"], 100.0)
         self.assertEqual(summary["risk_level"], "data_quality")
         self.assertEqual(summary["anomaly_reason"], "possible_incomplete_window")
 
@@ -118,9 +120,67 @@ class DetectionTests(unittest.TestCase):
         self.assertEqual(summary["threat_score"], 20)
         self.assertEqual(summary["detection_count"], 1)
         self.assertFalse(summary["attack_predicted"])
-        self.assertFalse(summary["is_anomaly"])
+        self.assertTrue(summary["is_anomaly"])
+        self.assertEqual(summary["anomaly_score"], 65.0)
+        self.assertEqual(summary["anomaly_percentile"], 65.0)
         self.assertEqual(summary["risk_level"], "service_activity_anomaly")
         self.assertEqual(summary["anomaly_reason"], "llm_activity_drop")
+        self.assertIn("LLM activity", summary["explanation"])
+
+    def test_repeated_llm_activity_drop_becomes_baseline_shift_candidate(self) -> None:
+        alerts, summary = evaluate_window_risk(
+            normalized_records=[{"_id": "1"}],
+            metrics={
+                "window_key": "current-window",
+                "total_records": 3900,
+                "llm_log_count": 800,
+            },
+            model_signal={
+                "model_available": False,
+                "source": "insufficient_history:7",
+            },
+            historical_signal={
+                "historical_available": True,
+                "historical_source": "robust_z:58",
+                "pattern_status": "critical_anomaly",
+                "pattern_reason": "llm_activity_drop",
+                "pattern_score": 100.0,
+                "max_feature_deviation": 12.0,
+                "pattern_signals": [
+                    {
+                        "feature": "llm_log_count",
+                        "severity": "critical",
+                        "points": 25,
+                        "direction": "lower_than_usual",
+                    }
+                ],
+            },
+        )
+        recent_windows = [
+            {
+                "window_key": f"previous-{index}",
+                "total_records": 3900,
+                "anomaly_reason": "llm_activity_drop",
+            }
+            for index in range(5)
+        ]
+
+        updated_alerts, updated_summary = apply_baseline_shift_context(
+            raw_alerts=alerts,
+            risk_summary=summary,
+            recent_window_metrics=recent_windows,
+        )
+
+        self.assertEqual(len(updated_alerts), 1)
+        self.assertEqual(updated_alerts[0]["alert_type"], "BASELINE_SHIFT_CANDIDATE")
+        self.assertEqual(updated_summary["threat_score"], 10)
+        self.assertFalse(updated_summary["attack_predicted"])
+        self.assertTrue(updated_summary["is_anomaly"])
+        self.assertEqual(updated_summary["anomaly_score"], 10.0)
+        self.assertEqual(updated_summary["anomaly_percentile"], 10.0)
+        self.assertEqual(updated_summary["risk_level"], "baseline_shift")
+        self.assertEqual(updated_summary["anomaly_reason"], "baseline_shift_candidate")
+        self.assertEqual(updated_summary["baseline_shift_windows"], 6)
 
     def test_llm_quality_degradation_emits_investigation_alert_not_attack(self) -> None:
         alerts, summary = evaluate_window_risk(
@@ -155,6 +215,9 @@ class DetectionTests(unittest.TestCase):
         self.assertEqual(alerts[0]["alert_type"], "LLM_QUALITY_DEGRADATION")
         self.assertEqual(summary["threat_score"], 10)
         self.assertFalse(summary["attack_predicted"])
+        self.assertTrue(summary["is_anomaly"])
+        self.assertEqual(summary["anomaly_score"], 25.0)
+        self.assertEqual(summary["anomaly_percentile"], 25.0)
         self.assertEqual(summary["risk_level"], "service_activity_anomaly")
         self.assertEqual(summary["anomaly_reason"], "llm_quality_degradation")
 
@@ -227,6 +290,9 @@ class DetectionTests(unittest.TestCase):
         self.assertEqual(summary["threat_score"], 50)
         self.assertEqual(summary["detection_count"], 2)
         self.assertFalse(summary["attack_predicted"])
+        self.assertTrue(summary["is_anomaly"])
+        self.assertEqual(summary["anomaly_score"], 50.0)
+        self.assertEqual(summary["anomaly_percentile"], 50.0)
         self.assertEqual(summary["risk_level"], "security_correlation")
         self.assertEqual(summary["anomaly_reason"], "security_correlation")
 
@@ -269,6 +335,9 @@ class DetectionTests(unittest.TestCase):
         self.assertIn("SECURITY_LLM_DISRUPTION_CORRELATION", alert_types)
         self.assertEqual(summary["threat_score"], 98)
         self.assertTrue(summary["attack_predicted"])
+        self.assertTrue(summary["is_anomaly"])
+        self.assertEqual(summary["anomaly_score"], 98.0)
+        self.assertEqual(summary["anomaly_percentile"], 98.0)
         self.assertEqual(summary["risk_level"], "security_correlation")
         self.assertEqual(summary["anomaly_reason"], "security_correlation")
 
