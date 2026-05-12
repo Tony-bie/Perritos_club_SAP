@@ -66,7 +66,7 @@ chat_ids = settings.chat_ids
 bot: Bot | None = None
 if Bot and DefaultBotProperties and ParseMode and token:
     try:
-        bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+        bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
     except Exception as exc:
         logger.warning("Telegram bot disabled due to invalid token: %s", exc)
 else:
@@ -319,17 +319,24 @@ async def health() -> Dict[str, Any]:
         status["fallback"] = fallback_status
     return status
 
+import re
+
 if router and Command:
     @router.message(Command("health"))
     async def health_telegram(message: Message):
         result = await health()
+        text = str(result)
+        patron = r"'([^']+)':\s*([^,}]+)"
+        matches = re.findall(patron, text)
+        lineas = []
+        for clave, valor in matches:
+            valor_limpio = valor.strip("'\"")
+            lineas.append(f"• *{clave.replace('_', ' ').title()}... * {valor_limpio}")
+        mensaje_final = "*Estado del Sistema*\n\n" + "\n".join(lineas)
         if bot is None:
             await message.answer("Telegram bot no esta configurado en este entorno.")
             return
-        if message.chat.id in chat_ids:
-            await bot.send_message(chat_id=message.chat.id, text=str(result))
-        else:
-            await message.answer("No tienes permiso para usar este comando.")
+        await bot.send_message(chat_id=message.chat.id, text=mensaje_final)
     
 
 @app.get("/health/sap")
@@ -496,14 +503,29 @@ if router and Command:
     @router.message(Command("last_status"))
     async def last_status_telegram(message: Message):
         result = status_latest()
-        if bot is None:
-            await message.answer("Telegram bot no esta configurado en este entorno.")
-            return
-        if message.chat.id in chat_ids:
-            await bot.send_message(chat_id=message.chat.id, text=str(result))
-        else:
-            await message.answer("No tienes permiso para usar este comando.")
+        text = str(result)
+        patron = r"'([^']+)':\s*([^,}]+)"
+        matches = re.findall(patron, text)
+        
+        lineas = []
+        for clave, valor in matches:
+            valor_limpio = valor.strip("'\" ")
+            clave_fmt = clave.replace('_', ' ').title()
+            valor_safe = valor_limpio.replace('<', '&lt;').replace('>', '&gt;')
+            
+            lineas.append(f"• <b>{clave_fmt}:</b> {valor_safe}")
 
+        mensaje_final = "<b>Estado del Sistema</b>\n\n" + "\n".join(lineas)
+        
+        if bot is None:
+            await message.answer("Telegram bot no está configurado.")
+            return
+
+        await bot.send_message(
+            chat_id=message.chat.id, 
+            text=mensaje_final, 
+            parse_mode="HTML" 
+        )
 @app.get("/alerts/recent", response_model=list[RecentAlertResponse])
 def alerts_recent(limit: int = Query(default=50, ge=1, le=200)) -> list[Dict[str, Any]]:
     if not _storage_status["ready"]:
