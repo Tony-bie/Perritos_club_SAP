@@ -95,7 +95,14 @@ class FakeStore:
         return {"status": "cleaned", "retention_days": retention_days, "rows_deleted": 0, "deleted_counts": {}}
 
     def get_recent_window_features(self, limit: int = 200):
-        return []
+        return [
+            {
+                "window_key": f"history-{index}",
+                "total_records": 100 + index,
+                "saved_at_utc": f"2026-05-02T09:{index:02d}:00Z",
+            }
+            for index in range(12)
+        ][:limit]
 
     def get_dashboard_summary(self, time_window_hours: int = 24):
         return {
@@ -114,6 +121,9 @@ class FakeStore:
             },
             "generated_at": "2026-05-02T10:31:00Z",
         }
+
+    def get_fallback_status(self):
+        return {"enabled": False, "pending_counts": {}}
 
 
 class BlockCApiTests(unittest.TestCase):
@@ -166,6 +176,24 @@ class BlockCApiTests(unittest.TestCase):
                 self.assertEqual(dashboard["alerts_by_severity"]["high"], 1)
                 self.assertEqual(dashboard["top_metrics"]["threat_score"], 80)
                 self.assertEqual(dashboard["last_run"]["status"], "success")
+
+    def test_history_status_endpoint_reports_readiness_gap(self) -> None:
+        fake_store = FakeStore()
+        with patch.object(application, "store", fake_store), patch.object(
+            application, "_storage_status", {"ready": True, "error": None}
+        ):
+            with TestClient(application.app) as client:
+                response = client.get("/history/status")
+                self.assertEqual(response.status_code, 200)
+                payload = response.json()
+                expected_min_required = max(20, application.settings.model_min_training_rows)
+
+                self.assertEqual(payload["status"], "ok")
+                self.assertEqual(payload["historical_rows"], 12)
+                self.assertEqual(payload["historical_min_required"], expected_min_required)
+                self.assertEqual(payload["historical_rows_remaining"], max(0, expected_min_required - 12))
+                self.assertEqual(payload["historical_ready"], 12 >= expected_min_required)
+                self.assertEqual(payload["latest_window_key"], "20260502T100000Z_20260502T103000Z")
 
 
 if __name__ == "__main__":

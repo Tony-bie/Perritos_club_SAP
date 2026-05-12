@@ -14,6 +14,7 @@ from backend.core.config import load_settings
 from backend.services.chatbot import generate_chatbot_response
 from backend.services.clients import SAPSOCClient
 from backend.services.detection import (
+    apply_baseline_shift_context,
     build_alert_submission_message,
     evaluate_window_risk,
     format_alert_events,
@@ -155,6 +156,59 @@ def _require_admin_token(
         raise HTTPException(status_code=403, detail="Invalid admin token")
 
 
+def _history_min_required() -> int:
+    return max(20, settings.model_min_training_rows)
+
+
+def _build_history_status(
+    preloaded_features: list[Dict[str, Any]] | None = None,
+    latest_window_metrics: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    feature_rows = (
+        preloaded_features
+        if preloaded_features is not None
+        else store.get_recent_window_features(limit=settings.model_history_limit)
+    )
+    latest_metrics = latest_window_metrics if latest_window_metrics is not None else store.get_latest_window_metrics()
+    historical_min_required = _history_min_required()
+    model_min_required = max(1, settings.model_min_training_rows)
+    history_count = len(feature_rows)
+    latest_metrics = latest_metrics or {}
+
+    return {
+        "historical_ready": history_count >= historical_min_required,
+        "historical_rows": history_count,
+        "historical_min_required": historical_min_required,
+        "historical_rows_remaining": max(0, historical_min_required - history_count),
+        "model_ready": history_count >= model_min_required,
+        "model_rows": history_count,
+        "model_min_required": model_min_required,
+        "model_rows_remaining": max(0, model_min_required - history_count),
+        "history_limit": settings.model_history_limit,
+        "latest_window_key": latest_metrics.get("window_key"),
+        "latest_historical_source": latest_metrics.get("historical_source"),
+        "latest_risk_level": latest_metrics.get("risk_level"),
+        "latest_anomaly_reason": latest_metrics.get("anomaly_reason"),
+        "latest_saved_at_utc": latest_metrics.get("saved_at_utc"),
+    }
+
+
+def _build_health_status() -> Dict[str, Any]:
+    status = {
+        "status": "ok" if _storage_status["ready"] else "degraded",
+        "worker_enabled": settings.enable_worker,
+        "worker_running": bool(_worker_thread and _worker_thread.is_alive()),
+        "storage_backend": settings.storage_backend,
+        "storage_ready": _storage_status["ready"],
+        "storage_error": _storage_status["error"],
+        "model_enabled": settings.model_enabled,
+    }
+    fallback_status = store.get_fallback_status()
+    if fallback_status.get("enabled"):
+        status["fallback"] = fallback_status
+    return status
+
+
 def execute_ingestion_cycle() -> Dict[str, Any]:
     run_id = str(uuid4())
     ingest_result, records = run_ingestion_cycle(client, run_id=run_id)
@@ -176,6 +230,7 @@ def execute_ingestion_cycle() -> Dict[str, Any]:
         window_end=ingest_result.window_end,
     )
     current_window_key = str(window_metrics.get("window_key") or "")
+    store.bulk_upsert_window_metrics([window_metrics], batch_size=settings.batch_size)
     history_rows = store.get_recent_window_features(limit=settings.model_history_limit)
     history_rows = [
         row
@@ -206,6 +261,12 @@ def execute_ingestion_cycle() -> Dict[str, Any]:
         historical_signal=historical_signal,
         count_threshold=settings.error_security_threshold,
         attack_score_threshold=settings.attack_score_threshold,
+    )
+    recent_windows = store.get_recent_window_metrics(limit=12)
+    raw_alerts, risk_summary = apply_baseline_shift_context(
+        raw_alerts=raw_alerts,
+        risk_summary=risk_summary,
+        recent_window_metrics=recent_windows,
     )
     window_metrics.update(risk_summary)
     window_metrics["run_id"] = run_id
@@ -257,6 +318,10 @@ def execute_ingestion_cycle() -> Dict[str, Any]:
         },
         "window_metrics": window_metrics,
         "model": model_signal,
+        "history": _build_history_status(
+            preloaded_features=history_rows,
+            latest_window_metrics=window_metrics,
+        ),
     }
 
 
@@ -307,19 +372,7 @@ def on_shutdown() -> None:
 
 @app.get("/health")
 async def health() -> Dict[str, Any]:
-    status = {
-        "status": "ok" if _storage_status["ready"] else "degraded",
-        "worker_enabled": settings.enable_worker,
-        "worker_running": bool(_worker_thread and _worker_thread.is_alive()),
-        "storage_backend": settings.storage_backend,
-        "storage_ready": _storage_status["ready"],
-        "storage_error": _storage_status["error"],
-        "model_enabled": settings.model_enabled,
-    }
-    fallback_status = store.get_fallback_status()
-    if fallback_status.get("enabled"):
-        status["fallback"] = fallback_status
-    return status
+    return _build_health_status()
 
 def _format_kv_for_telegram(title: str, data: Dict[str, Any]) -> str:
     lines = [title]
@@ -338,14 +391,54 @@ def _extract_command_argument(raw_text: str, command_name: str) -> str:
     return match.group(1).strip()
 
 
+def _context_call(name: str, builder: Any) -> Dict[str, Any]:
+    try:
+        return {
+            "ok": True,
+            "data": builder(),
+        }
+    except Exception as exc:
+        logger.warning("Failed to build chatbot endpoint context for %s: %s", name, exc)
+        return {
+            "ok": False,
+            "error": str(exc),
+        }
+
+
 def _build_chatbot_context(question: str) -> Dict[str, Any]:
-    recent_alerts = store.get_recent_alerts(limit=8)
-    recent_windows = store.get_recent_window_metrics(limit=6)
-    recent_runs = store.get_recent_ingest_runs(limit=3)
+    recent_alerts = store.get_recent_alerts(limit=20)
+    recent_windows = store.get_recent_window_metrics(limit=20)
+    recent_runs = store.get_recent_ingest_runs(limit=10)
+    latest_run = recent_runs[0] if recent_runs else {}
+    latest_window = recent_windows[0] if recent_windows else {}
+    fallback_status = store.get_fallback_status()
 
     high_alerts = sum(1 for alert in recent_alerts if str(alert.get("severity", "")).lower() in {"high", "critical"})
     anomaly_windows = sum(1 for window in recent_windows if bool(window.get("is_anomaly")))
-    latest_status = recent_runs[0].get("status", "no-runs") if recent_runs else "no-runs"
+    latest_status = latest_run.get("status", "no-runs") if latest_run else "no-runs"
+
+    endpoint_snapshots = {
+        "GET /health": _context_call("GET /health", _build_health_status),
+        "GET /history/status": _context_call("GET /history/status", _build_history_status),
+        "GET /status/latest": _context_call("GET /status/latest", status_latest),
+        "GET /dashboard/summary?time_window_hours=24": _context_call(
+            "GET /dashboard/summary?time_window_hours=24",
+            lambda: dashboard_summary(time_window_hours=24),
+        ),
+        "GET /alerts/recent?limit=20": {
+            "ok": True,
+            "data": recent_alerts,
+        },
+        "GET /metrics/windows?limit=20": {
+            "ok": True,
+            "data": recent_windows,
+        },
+        "GET /runs/recent?limit=10": {
+            "ok": True,
+            "data": recent_runs,
+        },
+        "GET /health/sap": _context_call("GET /health/sap", health_sap),
+    }
 
     return {
         "question": question,
@@ -354,7 +447,14 @@ def _build_chatbot_context(question: str) -> Dict[str, Any]:
             "high_alerts": high_alerts,
             "anomaly_windows": anomaly_windows,
             "latest_run_status": latest_status,
+            "latest_run_id": latest_run.get("run_id"),
+            "latest_window_key": latest_window.get("window_key"),
+            "latest_risk_level": latest_window.get("risk_level"),
+            "latest_anomaly_reason": latest_window.get("anomaly_reason"),
+            "fallback_enabled": bool(fallback_status.get("enabled")),
+            "fallback_pending_counts": fallback_status.get("pending_counts", {}),
         },
+        "endpoint_snapshots": endpoint_snapshots,
         "recent_alerts": recent_alerts,
         "recent_windows": recent_windows,
         "recent_runs": recent_runs,
@@ -531,6 +631,27 @@ def status_latest() -> Dict[str, Any]:
         "status": "ok",
         "latest_run": latest,
         "latest_window_metrics": store.get_latest_window_metrics(),
+    }
+    fallback_status = store.get_fallback_status()
+    if fallback_status.get("enabled"):
+        response["fallback"] = fallback_status
+    return response
+
+
+@app.get("/history/status")
+def history_status() -> Dict[str, Any]:
+    if not _storage_status["ready"]:
+        return {
+            "status": "degraded",
+            "storage_backend": settings.storage_backend,
+            "storage_ready": False,
+            "storage_error": _storage_status["error"],
+        }
+
+    response = {
+        "status": "ok",
+        "storage_backend": settings.storage_backend,
+        **_build_history_status(),
     }
     fallback_status = store.get_fallback_status()
     if fallback_status.get("enabled"):
