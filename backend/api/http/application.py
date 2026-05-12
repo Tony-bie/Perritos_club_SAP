@@ -160,19 +160,44 @@ def _history_min_required() -> int:
     return max(20, settings.model_min_training_rows)
 
 
+def _window_has_records(window: Dict[str, Any]) -> bool:
+    try:
+        return int(float(window.get("total_records", 0) or 0)) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _build_baseline_history_rows(
+    preloaded_windows: list[Dict[str, Any]] | None = None,
+    exclude_window_key: str | None = None,
+) -> list[Dict[str, Any]]:
+    windows = (
+        preloaded_windows
+        if preloaded_windows is not None
+        else store.get_recent_window_metrics(limit=settings.model_history_limit)
+    )
+    return [
+        window
+        for window in windows
+        if _window_has_records(window)
+        and (not exclude_window_key or str(window.get("window_key") or "") != exclude_window_key)
+    ]
+
+
 def _build_history_status(
-    preloaded_features: list[Dict[str, Any]] | None = None,
+    baseline_rows: list[Dict[str, Any]] | None = None,
+    model_feature_rows: list[Dict[str, Any]] | None = None,
     latest_window_metrics: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
-    feature_rows = (
-        preloaded_features
-        if preloaded_features is not None
-        else store.get_recent_window_features(limit=settings.model_history_limit)
+    baseline_history_rows = baseline_rows if baseline_rows is not None else _build_baseline_history_rows()
+    feature_rows = model_feature_rows if model_feature_rows is not None else store.get_recent_window_features(
+        limit=settings.model_history_limit
     )
     latest_metrics = latest_window_metrics if latest_window_metrics is not None else store.get_latest_window_metrics()
     historical_min_required = _history_min_required()
     model_min_required = max(1, settings.model_min_training_rows)
-    history_count = len(feature_rows)
+    history_count = len(baseline_history_rows)
+    model_history_count = len(feature_rows)
     latest_metrics = latest_metrics or {}
 
     return {
@@ -180,10 +205,12 @@ def _build_history_status(
         "historical_rows": history_count,
         "historical_min_required": historical_min_required,
         "historical_rows_remaining": max(0, historical_min_required - history_count),
-        "model_ready": history_count >= model_min_required,
-        "model_rows": history_count,
+        "historical_source_table": "window_metrics",
+        "model_ready": model_history_count >= model_min_required,
+        "model_rows": model_history_count,
         "model_min_required": model_min_required,
-        "model_rows_remaining": max(0, model_min_required - history_count),
+        "model_rows_remaining": max(0, model_min_required - model_history_count),
+        "model_source_table": "window_features",
         "history_limit": settings.model_history_limit,
         "latest_window_key": latest_metrics.get("window_key"),
         "latest_historical_source": latest_metrics.get("historical_source"),
@@ -231,12 +258,11 @@ def execute_ingestion_cycle() -> Dict[str, Any]:
     )
     current_window_key = str(window_metrics.get("window_key") or "")
     store.bulk_upsert_window_metrics([window_metrics], batch_size=settings.batch_size)
-    history_rows = store.get_recent_window_features(limit=settings.model_history_limit)
-    history_rows = [
-        row
-        for row in history_rows
-        if str(row.get("window_key") or "") != current_window_key
-    ]
+    recent_windows_for_baseline = store.get_recent_window_metrics(limit=settings.model_history_limit)
+    history_rows = _build_baseline_history_rows(
+        preloaded_windows=recent_windows_for_baseline,
+        exclude_window_key=current_window_key,
+    )
 
     historical_signal = score_historical_pattern(
         current_metrics=window_metrics,
@@ -319,7 +345,6 @@ def execute_ingestion_cycle() -> Dict[str, Any]:
         "window_metrics": window_metrics,
         "model": model_signal,
         "history": _build_history_status(
-            preloaded_features=history_rows,
             latest_window_metrics=window_metrics,
         ),
     }
@@ -532,16 +557,14 @@ def run_reprocess_windows(limit: int = 50, persist: bool = True) -> Dict[str, An
     try:
         effective_limit = 1_000_000 if int(limit) <= 0 else int(limit)
         windows = store.get_recent_window_metrics(limit=effective_limit)
-        feature_history = store.get_recent_window_features(limit=settings.model_history_limit)
         processed = []
 
         for window_metrics in windows:
             current_window_key = str(window_metrics.get("window_key") or "")
-            history_rows = [
-                row
-                for row in feature_history
-                if str(row.get("window_key") or "") != current_window_key
-            ]
+            history_rows = _build_baseline_history_rows(
+                preloaded_windows=windows,
+                exclude_window_key=current_window_key,
+            )[: settings.model_history_limit]
             historical_signal = score_historical_pattern(
                 current_metrics=window_metrics,
                 history_rows=history_rows,
