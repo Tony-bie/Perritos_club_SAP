@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from backend.services.ingestion.features import build_window_metrics
+from backend.services.ingestion.features import build_window_metric_batches, build_window_metrics
 from backend.services.ingestion.normalize import normalize_records
 from backend.storage.backends.store import SqliteStore
 
@@ -69,6 +69,34 @@ class IngestionFeatureTests(unittest.TestCase):
         self.assertEqual(metrics["llm_timeout_count"], 1)
         self.assertEqual(metrics["avg_llm_latency_ms"], 3100)
         self.assertAlmostEqual(metrics["total_llm_cost_usd"], 0.42)
+
+    def test_build_window_metric_batches_groups_by_log_timestamp(self) -> None:
+        normalized = normalize_records(
+            [
+                {
+                    "_id": "1",
+                    "@timestamp": "2026-04-25T10:05:00+00:00",
+                    "sap_function_log_type": "ERROR",
+                },
+                {
+                    "_id": "2",
+                    "@timestamp": "2026-04-25T10:35:00+00:00",
+                    "sap_function_log_type": "LLM_ERROR",
+                },
+            ]
+        )
+
+        batches = build_window_metric_batches(
+            normalized_records=normalized,
+            window_start="2026-01-01T00:00:00+00:00",
+            window_end="2026-01-01T00:30:00+00:00",
+        )
+
+        self.assertEqual(len(batches), 2)
+        self.assertEqual(batches[0][0]["window_key"], "20260425T100000Z_20260425T103000Z")
+        self.assertEqual(batches[1][0]["window_key"], "20260425T103000Z_20260425T110000Z")
+        self.assertEqual(batches[0][0]["total_records"], 1)
+        self.assertEqual(batches[1][0]["llm_error_count"], 1)
 
     def test_sqlite_store_persists_run_id_and_detection_count(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

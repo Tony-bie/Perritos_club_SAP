@@ -34,6 +34,14 @@ NUMERIC_FEATURE_COLUMNS = [
     "top_ip_event_share",
 ]
 
+TIMESTAMP_FIELDS = (
+    "@timestamp",
+    "timestamp",
+    "event_time",
+    "log_ts",
+    "time",
+)
+
 
 def _safe_float(value: Any) -> float | None:
     if value in {None, ""}:
@@ -57,21 +65,70 @@ def _percentile(values: List[float], percentile: float) -> float:
     return float(ordered[lower] + (ordered[upper] - ordered[lower]) * fraction)
 
 
+def _parse_timestamp(value: Any) -> datetime | None:
+    if value in {None, ""}:
+        return None
+    raw_value = str(value).strip()
+    if not raw_value:
+        return None
+    if raw_value.endswith("Z"):
+        raw_value = f"{raw_value[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw_value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _record_timestamp(record: Dict[str, Any]) -> datetime | None:
+    for field_name in TIMESTAMP_FIELDS:
+        parsed = _parse_timestamp(record.get(field_name))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _floor_half_hour(value: datetime) -> datetime:
+    minute_slot = 0 if value.minute < 30 else 30
+    return value.astimezone(timezone.utc).replace(minute=minute_slot, second=0, microsecond=0)
+
+
+def _format_window_key(window_start: datetime, window_end: datetime) -> str:
+    start = window_start.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    end = window_end.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"{start}_{end}"
+
+
 def _window_key(window_start: str | None, window_end: str | None) -> str:
+    parsed_start = _parse_timestamp(window_start)
+    parsed_end = _parse_timestamp(window_end)
+    if parsed_start and parsed_end:
+        return _format_window_key(parsed_start, parsed_end)
     if window_start and window_end:
-        try:
-            start = datetime.fromisoformat(window_start).astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            end = datetime.fromisoformat(window_end).astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        except ValueError:
-            start = window_start.replace(":", "").replace("-", "")
-            end = window_end.replace(":", "").replace("-", "")
+        start = window_start.replace(":", "").replace("-", "")
+        end = window_end.replace(":", "").replace("-", "")
         return f"{start}_{end}"
 
     now = datetime.now(timezone.utc)
-    minute_slot = 0 if now.minute < 30 else 30
-    current = now.replace(minute=minute_slot, second=0, microsecond=0)
+    current = _floor_half_hour(now)
     end = current + timedelta(minutes=30)
-    return f"{current.isoformat()}_{end.isoformat()}"
+    return _format_window_key(current, end)
+
+
+def _window_bounds(window_start: str | None, window_end: str | None) -> tuple[str | None, str | None]:
+    parsed_start = _parse_timestamp(window_start)
+    parsed_end = _parse_timestamp(window_end)
+    if parsed_start and parsed_end:
+        return parsed_start.isoformat(), parsed_end.isoformat()
+    return window_start, window_end
+
+
+def _timestamp_window_bounds(timestamp: datetime) -> tuple[str, str]:
+    start = _floor_half_hour(timestamp)
+    end = start + timedelta(minutes=30)
+    return start.isoformat(), end.isoformat()
 
 
 def build_window_metrics(
@@ -79,6 +136,7 @@ def build_window_metrics(
     window_start: str | None,
     window_end: str | None,
 ) -> Dict[str, Any]:
+    window_start, window_end = _window_bounds(window_start, window_end)
     total_records = len(normalized_records)
     log_types = Counter(str(record.get("sap_function_log_type", "")).upper() for record in normalized_records)
     system_records = [record for record in normalized_records if record.get("is_system_log", False)]
@@ -137,3 +195,31 @@ def build_window_metrics(
         "saved_at_utc": datetime.now(timezone.utc).isoformat(),
     }
     return metrics
+
+
+def build_window_metric_batches(
+    normalized_records: List[Dict[str, Any]],
+    window_start: str | None,
+    window_end: str | None,
+) -> List[tuple[Dict[str, Any], List[Dict[str, Any]]]]:
+    buckets: Dict[tuple[str, str], List[Dict[str, Any]]] = {}
+    unbucketed: List[Dict[str, Any]] = []
+
+    for record in normalized_records:
+        timestamp = _record_timestamp(record)
+        if timestamp is None:
+            unbucketed.append(record)
+            continue
+        start, end = _timestamp_window_bounds(timestamp)
+        buckets.setdefault((start, end), []).append(record)
+
+    if not buckets:
+        return [(build_window_metrics(normalized_records, window_start, window_end), normalized_records)]
+
+    batches = [
+        (build_window_metrics(records, start, end), records)
+        for (start, end), records in sorted(buckets.items())
+    ]
+    if unbucketed:
+        batches.append((build_window_metrics(unbucketed, window_start, window_end), unbucketed))
+    return batches

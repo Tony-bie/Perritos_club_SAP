@@ -24,7 +24,7 @@ from backend.services.detection import (
     unavailable_model_signal,
 )
 from backend.services.ingestion import (
-    build_window_metrics,
+    build_window_metric_batches,
     ingest_result_to_dict,
     normalize_records,
     run_ingestion_cycle,
@@ -251,101 +251,129 @@ def execute_ingestion_cycle() -> Dict[str, Any]:
 
     normalized = normalize_records(records)
     upserted = store.bulk_upsert_raw_logs(normalized, batch_size=settings.batch_size)
-    window_metrics = build_window_metrics(
+    metric_batches = build_window_metric_batches(
         normalized_records=normalized,
         window_start=ingest_result.window_start,
         window_end=ingest_result.window_end,
     )
-    current_window_key = str(window_metrics.get("window_key") or "")
-    store.bulk_upsert_window_metrics([window_metrics], batch_size=settings.batch_size)
-    recent_windows_for_baseline = store.get_recent_window_metrics(limit=settings.model_history_limit)
-    history_rows = _build_baseline_history_rows(
-        preloaded_windows=recent_windows_for_baseline,
-        exclude_window_key=current_window_key,
-    )
+    processed_windows = []
+    alerts_inserted = 0
+    alert_submissions = []
+    latest_window_metrics: Dict[str, Any] = {}
+    latest_model_signal: Dict[str, Any] = unavailable_model_signal("no_windows_processed")
 
-    historical_signal = score_historical_pattern(
-        current_metrics=window_metrics,
-        history_rows=history_rows,
-        min_history_rows=max(20, settings.model_min_training_rows),
-    )
-
-    model_signal = (
-        score_window_metrics(
-            settings=settings,
-            current_window_key=current_window_key,
-            min_training_rows=settings.model_min_training_rows,
-            contamination=settings.model_contamination,
+    for window_metrics, window_records in metric_batches:
+        window_metrics["run_id"] = run_id
+        current_window_key = str(window_metrics.get("window_key") or "")
+        store.bulk_upsert_window_metrics([window_metrics], batch_size=settings.batch_size)
+        recent_windows_for_baseline = store.get_recent_window_metrics(limit=settings.model_history_limit)
+        history_rows = _build_baseline_history_rows(
+            preloaded_windows=recent_windows_for_baseline,
+            exclude_window_key=current_window_key,
         )
-        if settings.model_enabled
-        else unavailable_model_signal("model_disabled")
-    )
-    raw_alerts, risk_summary = evaluate_window_risk(
-        normalized_records=normalized,
-        metrics=window_metrics,
-        model_signal=model_signal,
-        historical_signal=historical_signal,
-        count_threshold=settings.error_security_threshold,
-        attack_score_threshold=settings.attack_score_threshold,
-    )
-    recent_windows = store.get_recent_window_metrics(limit=12)
-    raw_alerts, risk_summary = apply_baseline_shift_context(
-        raw_alerts=raw_alerts,
-        risk_summary=risk_summary,
-        recent_window_metrics=recent_windows,
-    )
-    window_metrics.update(risk_summary)
-    window_metrics["run_id"] = run_id
-    store.bulk_upsert_window_metrics([window_metrics], batch_size=settings.batch_size)
-    alert_events = format_alert_events(raw_alerts, run_id=run_id)
-    alerts_inserted = store.insert_alerts(alert_events)
-    submitted_alert_response: Dict[str, Any] | None = None
-    submitted_alert_error: str | None = None
-    submitted_alert_message: str | None = None
-    submitted_alert_eligible = False
-    submitted_alert_reason = "no_detection_signals"
 
-    submitted_alert_eligible, submitted_alert_reason = should_submit_alert_notification(
-        window_metrics=window_metrics,
-        raw_alerts=raw_alerts,
-        attack_score_threshold=settings.attack_score_threshold,
-    )
+        historical_signal = score_historical_pattern(
+            current_metrics=window_metrics,
+            history_rows=history_rows,
+            min_history_rows=max(20, settings.model_min_training_rows),
+        )
 
-    if submitted_alert_eligible:
-        submitted_alert_message = build_alert_submission_message(
+        model_signal = (
+            score_window_metrics(
+                settings=settings,
+                current_window_key=current_window_key,
+                min_training_rows=settings.model_min_training_rows,
+                contamination=settings.model_contamination,
+            )
+            if settings.model_enabled
+            else unavailable_model_signal("model_disabled")
+        )
+        raw_alerts, risk_summary = evaluate_window_risk(
+            normalized_records=window_records,
+            metrics=window_metrics,
+            model_signal=model_signal,
+            historical_signal=historical_signal,
+            count_threshold=settings.error_security_threshold,
+            attack_score_threshold=settings.attack_score_threshold,
+        )
+        recent_windows = store.get_recent_window_metrics(limit=12)
+        raw_alerts, risk_summary = apply_baseline_shift_context(
+            raw_alerts=raw_alerts,
+            risk_summary=risk_summary,
+            recent_window_metrics=recent_windows,
+        )
+        window_metrics.update(risk_summary)
+        window_metrics["run_id"] = run_id
+        store.bulk_upsert_window_metrics([window_metrics], batch_size=settings.batch_size)
+        alert_events = format_alert_events(raw_alerts, run_id=run_id)
+        window_alerts_inserted = store.insert_alerts(alert_events)
+        alerts_inserted += window_alerts_inserted
+
+        submitted_alert_response: Dict[str, Any] | None = None
+        submitted_alert_error: str | None = None
+        submitted_alert_message: str | None = None
+        submitted_alert_eligible, submitted_alert_reason = should_submit_alert_notification(
             window_metrics=window_metrics,
             raw_alerts=raw_alerts,
-            notification_reason=submitted_alert_reason,
+            attack_score_threshold=settings.attack_score_threshold,
         )
-        try:
-            submitted_alert_response = client.submit_alert(submitted_alert_message)
-        except Exception as exc:
-            submitted_alert_error = str(exc)
-            logger.warning(
-                "Failed to submit alert to SAP endpoint. run_id=%s error=%s",
-                run_id,
-                exc,
+
+        if submitted_alert_eligible:
+            submitted_alert_message = build_alert_submission_message(
+                window_metrics=window_metrics,
+                raw_alerts=raw_alerts,
+                notification_reason=submitted_alert_reason,
             )
+            try:
+                submitted_alert_response = client.submit_alert(submitted_alert_message)
+            except Exception as exc:
+                submitted_alert_error = str(exc)
+                logger.warning(
+                    "Failed to submit alert to SAP endpoint. run_id=%s window_key=%s error=%s",
+                    run_id,
+                    current_window_key,
+                    exc,
+                )
+
+        alert_submissions.append(
+            {
+                "window_key": current_window_key,
+                "attempted": bool(raw_alerts),
+                "eligible": submitted_alert_eligible,
+                "eligibility_reason": submitted_alert_reason,
+                "message": submitted_alert_message,
+                "submitted": submitted_alert_response is not None,
+                "response": submitted_alert_response,
+                "error": submitted_alert_error,
+            }
+        )
+        processed_windows.append(window_metrics)
+        latest_window_metrics = window_metrics
+        latest_model_signal = model_signal
 
     store.insert_ingest_run(run_data)
+    latest_alert_submission = alert_submissions[-1] if alert_submissions else {
+        "attempted": False,
+        "eligible": False,
+        "eligibility_reason": "no_windows_processed",
+        "message": None,
+        "submitted": False,
+        "response": None,
+        "error": None,
+    }
 
     return {
         "run": run_data,
         "upserted_records": upserted,
         "alerts_count": alerts_inserted,
-        "alert_submission": {
-            "attempted": bool(raw_alerts),
-            "eligible": submitted_alert_eligible,
-            "eligibility_reason": submitted_alert_reason,
-            "message": submitted_alert_message,
-            "submitted": submitted_alert_response is not None,
-            "response": submitted_alert_response,
-            "error": submitted_alert_error,
-        },
-        "window_metrics": window_metrics,
-        "model": model_signal,
+        "window_count": len(processed_windows),
+        "alert_submission": latest_alert_submission,
+        "alert_submissions": alert_submissions,
+        "window_metrics": latest_window_metrics,
+        "windows": processed_windows,
+        "model": latest_model_signal,
         "history": _build_history_status(
-            latest_window_metrics=window_metrics,
+            latest_window_metrics=latest_window_metrics,
         ),
     }
 
@@ -635,6 +663,83 @@ def run_reprocess_windows(limit: int = 50, persist: bool = True) -> Dict[str, An
         }
     except Exception as exc:
         logger.exception("Historical window reprocess failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/run/rebuild-windows-from-raw")
+def run_rebuild_windows_from_raw(
+    limit: int = 0,
+    persist: bool = True,
+    _: None = Depends(_require_admin_token),
+) -> Dict[str, Any]:
+    if not _storage_status["ready"]:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Storage backend unavailable: {_storage_status['error'] or 'unknown error'}",
+        )
+
+    try:
+        effective_limit = 100_000 if int(limit) <= 0 else int(limit)
+        raw_logs = store.export_raw_logs(limit=effective_limit)
+        normalized = normalize_records(raw_logs)
+        metric_batches = build_window_metric_batches(
+            normalized_records=normalized,
+            window_start=None,
+            window_end=None,
+        )
+        processed = []
+
+        for window_metrics, window_records in metric_batches:
+            current_window_key = str(window_metrics.get("window_key") or "")
+            if persist:
+                store.upsert_window_metrics(window_metrics)
+
+            recent_windows_for_baseline = store.get_recent_window_metrics(limit=settings.model_history_limit)
+            history_rows = _build_baseline_history_rows(
+                preloaded_windows=recent_windows_for_baseline,
+                exclude_window_key=current_window_key,
+            )
+            historical_signal = score_historical_pattern(
+                current_metrics=window_metrics,
+                history_rows=history_rows,
+                min_history_rows=max(20, settings.model_min_training_rows),
+            )
+            model_signal = unavailable_model_signal("raw_rebuild_model_skipped")
+            raw_alerts, risk_summary = evaluate_window_risk(
+                normalized_records=window_records,
+                metrics=window_metrics,
+                model_signal=model_signal,
+                historical_signal=historical_signal,
+                count_threshold=settings.error_security_threshold,
+                attack_score_threshold=settings.attack_score_threshold,
+            )
+            updated_metrics = dict(window_metrics)
+            updated_metrics.update(risk_summary)
+
+            if persist:
+                store.upsert_window_metrics(updated_metrics)
+
+            processed.append(
+                {
+                    "window_key": current_window_key,
+                    "total_records": updated_metrics.get("total_records", 0),
+                    "risk_level": updated_metrics.get("risk_level"),
+                    "anomaly_reason": updated_metrics.get("anomaly_reason"),
+                    "historical_source": updated_metrics.get("historical_source"),
+                    "alert_types": [alert.get("alert_type") for alert in raw_alerts],
+                }
+            )
+
+        return {
+            "status": "ok",
+            "persisted": persist,
+            "raw_logs_read": len(raw_logs),
+            "window_count": len(processed),
+            "history": _build_history_status(),
+            "windows": processed,
+        }
+    except Exception as exc:
+        logger.exception("Raw log window rebuild failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
 
 
