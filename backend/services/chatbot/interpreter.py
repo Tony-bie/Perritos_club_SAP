@@ -17,6 +17,9 @@ def _fallback_response(question: str, context: Dict[str, Any], reason: str) -> s
     high_alerts = summary.get("high_alerts", 0)
     anomaly_windows = summary.get("anomaly_windows", 0)
     latest_status = summary.get("latest_run_status", "unknown")
+    latest_risk = summary.get("latest_risk_level", "unknown")
+    latest_reason = summary.get("latest_anomaly_reason", "unknown")
+    fallback_counts = summary.get("fallback_pending_counts", {})
 
     return (
         "No pude usar un modelo LLM en este momento"
@@ -25,6 +28,8 @@ def _fallback_response(question: str, context: Dict[str, Any], reason: str) -> s
         f"- Alertas recientes: {alerts} (alta severidad: {high_alerts})\n"
         f"- Ventanas con anomalia: {anomaly_windows}\n"
         f"- Estado ultimo ingestion run: {latest_status}\n\n"
+        f"- Riesgo/anomalia mas reciente: {latest_risk} / {latest_reason}\n"
+        f"- Pendientes fallback: {fallback_counts}\n\n"
         "Tip: configura LLM_PROVIDER_MODEL y LLM_API_KEY para respuestas interpretadas.\n"
         f"Pregunta recibida: {question}"
     )
@@ -35,7 +40,8 @@ def _build_messages(question: str, context: Dict[str, Any]) -> list[Dict[str, st
 
     system_prompt = (
         "Eres un analista SOC que responde en espanol para Telegram. "
-        "Usa solo el contexto entregado. "
+        "Usa solo el contexto entregado, especialmente endpoint_snapshots. "
+        "Cuando sea util, menciona el endpoint que respalda tu conclusion. "
         "Si faltan datos, dilo claramente. "
         "Responde en maximo 8 lineas, con foco operativo y acciones concretas."
     )
@@ -45,6 +51,9 @@ def _build_messages(question: str, context: Dict[str, Any]) -> list[Dict[str, st
         f"{question}\n\n"
         "Contexto estructurado:\n"
         f"{context_json}\n\n"
+        "endpoint_snapshots contiene salidas equivalentes a endpoints HTTP utiles "
+        "(health, history, status, dashboard, alerts, windows, runs y SAP health). "
+        "No inventes datos fuera de esos snapshots.\n\n"
         "Entrega:\n"
         "1) Que esta pasando\n"
         "2) Riesgo actual\n"

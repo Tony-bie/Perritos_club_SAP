@@ -288,6 +288,41 @@ class ResilientStoreTests(unittest.TestCase):
             self.assertEqual(len(primary.window_metrics), 1)
             self.assertEqual(len(primary.alerts), 1)
 
+    def test_read_after_primary_recovery_auto_syncs_pending_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            fallback = SqliteStore(str(Path(tmp_dir) / "fallback.db"))
+            primary = FailingPrimaryStore()
+            store = ResilientStore(primary=primary, fallback=fallback)
+            store.ensure_schema()
+
+            ingest_run = {
+                "run_id": "run-1",
+                "status": "success",
+                "started_at_utc": "2026-05-10T10:00:00+00:00",
+                "ended_at_utc": "2026-05-10T10:00:10+00:00",
+                "duration_seconds": 10.0,
+                "window_start": "2026-05-10T10:00:00+00:00",
+                "window_end": "2026-05-10T10:30:00+00:00",
+                "total_pages_expected": 1,
+                "total_pages_fetched": 1,
+                "total_records_info": 1,
+                "total_records_fetched": 1,
+                "error_message": None,
+            }
+
+            store.insert_ingest_run(ingest_run)
+            self.assertEqual(store.get_fallback_status()["pending_counts"]["ingest_runs"], 1)
+
+            primary.fail_writes = False
+            runs = store.get_recent_ingest_runs(limit=10)
+            fallback_status = store.get_fallback_status()
+
+            self.assertEqual([run["run_id"] for run in runs], ["run-1"])
+            self.assertEqual(fallback_status["pending_counts"]["ingest_runs"], 0)
+            self.assertIsNotNone(fallback_status["last_fallback_sync_utc"])
+            self.assertEqual(fallback_status["last_fallback_sync_result"]["status"], "ok")
+            self.assertEqual(len(primary.ingest_runs), 1)
+
     def test_duplicate_fallback_records_do_not_duplicate_on_resync(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             fallback = SqliteStore(str(Path(tmp_dir) / "fallback.db"))

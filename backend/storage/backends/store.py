@@ -1178,6 +1178,8 @@ class ResilientStore(BaseStore):
         self.primary_available = False
         self.last_primary_error: str | None = None
         self.last_fallback_write_utc: str | None = None
+        self.last_fallback_sync_utc: str | None = None
+        self.last_fallback_sync_result: Dict[str, Any] | None = None
 
     def ensure_schema(self) -> None:
         self.fallback.ensure_schema()
@@ -1299,6 +1301,8 @@ class ResilientStore(BaseStore):
             "primary_available": self.primary_available,
             "last_primary_error": self.last_primary_error,
             "last_fallback_write_utc": self.last_fallback_write_utc,
+            "last_fallback_sync_utc": self.last_fallback_sync_utc,
+            "last_fallback_sync_result": self.last_fallback_sync_result,
             "pending_counts": self.fallback.get_pending_counts(),
         }
 
@@ -1307,6 +1311,8 @@ class ResilientStore(BaseStore):
             result = getattr(self.primary, method_name)(**kwargs)
             self.primary_available = True
             self.last_primary_error = None
+            if self._sync_fallback_if_pending():
+                result = getattr(self.primary, method_name)(**kwargs)
             return result
         except Exception as exc:
             self.primary_available = False
@@ -1318,12 +1324,23 @@ class ResilientStore(BaseStore):
             result = getattr(self.primary, method_name)(*args, **kwargs)
             self.primary_available = True
             self.last_primary_error = None
+            self._sync_fallback_if_pending()
             return result
         except Exception as exc:
             self.primary_available = False
             self.last_primary_error = str(exc)
             self.last_fallback_write_utc = datetime.now().isoformat()
             return getattr(self.fallback, method_name)(*args, **kwargs)
+
+    def _sync_fallback_if_pending(self) -> bool:
+        pending_counts = self.fallback.get_pending_counts()
+        if not any(pending_counts.values()):
+            return False
+
+        result = self.sync_fallback_to_primary()
+        self.last_fallback_sync_utc = datetime.now().isoformat()
+        self.last_fallback_sync_result = result
+        return True
 
 
 def create_store(settings: Settings) -> BaseStore:
