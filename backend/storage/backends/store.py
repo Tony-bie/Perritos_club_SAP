@@ -86,6 +86,9 @@ class BaseStore(ABC):
             "pending_counts": {},
         }
 
+    def export_raw_logs(self, limit: int = 100000) -> List[Dict[str, Any]]:
+        return []
+
 
 class SqliteStore(BaseStore):
     def __init__(self, sqlite_path: str) -> None:
@@ -501,15 +504,27 @@ class SqliteStore(BaseStore):
             "cutoff_utc": cutoff_iso,
         }
 
-    def export_raw_logs(self) -> List[Dict[str, Any]]:
+    def export_raw_logs(self, limit: int = 100000) -> List[Dict[str, Any]]:
+        effective_limit = int(limit)
         with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT log_id, payload
-                FROM raw_logs
-                ORDER BY ingested_at ASC
-                """
-            ).fetchall()
+            if effective_limit > 0:
+                rows = conn.execute(
+                    """
+                    SELECT log_id, payload
+                    FROM raw_logs
+                    ORDER BY COALESCE(log_ts, ingested_at) ASC
+                    LIMIT ?
+                    """,
+                    (effective_limit,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT log_id, payload
+                    FROM raw_logs
+                    ORDER BY COALESCE(log_ts, ingested_at) ASC
+                    """
+                ).fetchall()
         return [json.loads(str(row["payload"])) for row in rows]
 
     def export_ingest_runs(self) -> List[Dict[str, Any]]:
@@ -820,6 +835,23 @@ class HanaStore(BaseStore):
                 total += len(batch)
             conn.commit()
         return total
+
+    def export_raw_logs(self, limit: int = 100000) -> List[Dict[str, Any]]:
+        schema = self.settings.hana_schema
+        effective_limit = int(limit)
+        limit_sql = f"LIMIT {effective_limit}" if effective_limit > 0 else ""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f'''
+                SELECT PAYLOAD
+                FROM "{schema}"."RAW_LOGS"
+                ORDER BY COALESCE(LOG_TS, INGESTED_AT) ASC
+                {limit_sql}
+                '''
+            )
+            rows = cursor.fetchall()
+        return [json.loads(str(row[0])) for row in rows]
 
     def insert_ingest_run(self, ingest_run: Dict[str, Any]) -> None:
         schema = self.settings.hana_schema
@@ -1229,6 +1261,9 @@ class ResilientStore(BaseStore):
 
     def get_latest_window_metrics(self) -> Optional[Dict[str, Any]]:
         return self._read_with_fallback("get_latest_window_metrics")
+
+    def export_raw_logs(self, limit: int = 100000) -> List[Dict[str, Any]]:
+        return self._read_with_fallback("export_raw_logs", limit=limit)
 
     def call_cleanup_procedure(self, retention_days: int = 90) -> Dict[str, Any]:
         primary_result: Dict[str, Any] | None = None
