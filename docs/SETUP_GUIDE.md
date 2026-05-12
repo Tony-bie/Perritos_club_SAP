@@ -177,33 +177,50 @@ python tools/check_hana_ingestion.py
 
 ---
 
-### Optional: Telegram Notifications
+### Optional: Telegram Chatbot (Alerts + Q&A)
 
-Setup your bot to get alerts on Telegram:
+Setup your bot to receive alerts and ask questions about recent logs.
 
 #### Step 1: Create Telegram Bot
 
 1. Open Telegram
 2. Search for **@BotFather**
-3. Send `/start` → `/newbot`
+3. Send `/start` -> `/newbot`
 4. Follow prompts, get your **token**
 
-#### Step 2: Add to `.env`
+#### Step 2: Add Telegram vars to `.env`
 
 ```env
 TOKEN_BOT_TELEGRAM=123456789:ABCdefGHIjklMNOpqrSTUvwxYZ
 CHAT_IDS=111222333,444555666
+TELEGRAM_CHATBOT_ENABLED=true
 ```
 
-#### Step 3: Test
+#### Step 3: Configure LiteLLM provider (free tier or local)
+
+```env
+LLM_ENABLED=true
+LLM_PROVIDER_MODEL=groq/llama-3.1-8b-instant
+LLM_API_KEY=your-provider-key
+# Optional if using proxy/self-hosted gateway
+LLM_BASE_URL=
+LLM_TEMPERATURE=0.2
+LLM_MAX_TOKENS=400
+```
+
+#### Step 4: Test
 
 ```bash
-python -c "from backend.api.http.application import bot; print(bot)"
+python -c "from backend.api.http.application import bot; print(bot is not None)"
 ```
 
-If no errors, Telegram is configured ✅
+Then in Telegram:
+- `/start`
+- `/health`
+- `/last_status`
+- `/ask que esta pasando con los logs hoy?`
 
-**Note**: If token is invalid, the system still works (just no Telegram alerts).
+If LiteLLM is unavailable, the bot still answers with a fallback summary from local metrics.
 
 ---
 

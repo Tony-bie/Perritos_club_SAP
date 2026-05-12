@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from typing import Any, Dict
@@ -10,6 +11,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel
 
 from backend.core.config import load_settings
+from backend.services.chatbot import generate_chatbot_response
 from backend.services.clients import SAPSOCClient
 from backend.services.detection import (
     build_alert_submission_message,
@@ -319,25 +321,83 @@ async def health() -> Dict[str, Any]:
         status["fallback"] = fallback_status
     return status
 
-import re
+def _format_kv_for_telegram(title: str, data: Dict[str, Any]) -> str:
+    lines = [title]
+    for key, value in data.items():
+        key_text = key.replace("_", " ").title()
+        value_text = str(value)
+        lines.append(f"- {key_text}: {value_text}")
+    return "\n".join(lines)
+
+
+def _extract_command_argument(raw_text: str, command_name: str) -> str:
+    pattern = rf"^/{command_name}(?:@[\w_]+)?\s*(.*)$"
+    match = re.match(pattern, raw_text.strip(), flags=re.IGNORECASE)
+    if not match:
+        return ""
+    return match.group(1).strip()
+
+
+def _build_chatbot_context(question: str) -> Dict[str, Any]:
+    recent_alerts = store.get_recent_alerts(limit=8)
+    recent_windows = store.get_recent_window_metrics(limit=6)
+    recent_runs = store.get_recent_ingest_runs(limit=3)
+
+    high_alerts = sum(1 for alert in recent_alerts if str(alert.get("severity", "")).lower() in {"high", "critical"})
+    anomaly_windows = sum(1 for window in recent_windows if bool(window.get("is_anomaly")))
+    latest_status = recent_runs[0].get("status", "no-runs") if recent_runs else "no-runs"
+
+    return {
+        "question": question,
+        "summary": {
+            "recent_alerts": len(recent_alerts),
+            "high_alerts": high_alerts,
+            "anomaly_windows": anomaly_windows,
+            "latest_run_status": latest_status,
+        },
+        "recent_alerts": recent_alerts,
+        "recent_windows": recent_windows,
+        "recent_runs": recent_runs,
+    }
+
+
+async def _handle_telegram_analysis(message: Message, question: str) -> None:
+    if not settings.telegram_chatbot_enabled:
+        await message.answer("El chatbot esta deshabilitado. Activa TELEGRAM_CHATBOT_ENABLED=true.")
+        return
+
+    if not _storage_status["ready"]:
+        await message.answer(
+            f"No puedo consultar logs ahora. Storage no disponible: {_storage_status['error'] or 'unknown error'}"
+        )
+        return
+
+    if not question:
+        await message.answer("Uso: /ask <pregunta>. Ejemplo: /ask que esta pasando con los logs?")
+        return
+
+    context = _build_chatbot_context(question=question)
+    response = generate_chatbot_response(question=question, context=context, settings=settings)
+    text = str(response.get("text") or "No hubo respuesta")
+    source = str(response.get("source") or "unknown")
+    await message.answer(f"{text}\n\nFuente: {source}", parse_mode=None)
+
 
 if router and Command:
+    @router.message(Command("start"))
+    async def start_telegram(message: Message) -> None:
+        await message.answer(
+            "Comandos disponibles:\n"
+            "/health - estado general\n"
+            "/last_status - ultimo run\n"
+            "/ask <pregunta> - interpreta alertas y logs recientes"
+        )
+
     @router.message(Command("health"))
-    async def health_telegram(message: Message):
+    async def health_telegram(message: Message) -> None:
         result = await health()
-        text = str(result)
-        patron = r"'([^']+)':\s*([^,}]+)"
-        matches = re.findall(patron, text)
-        lineas = []
-        for clave, valor in matches:
-            valor_limpio = valor.strip("'\"")
-            lineas.append(f"• *{clave.replace('_', ' ').title()}... * {valor_limpio}")
-        mensaje_final = "*Estado del Sistema*\n\n" + "\n".join(lineas)
-        if bot is None:
-            await message.answer("Telegram bot no esta configurado en este entorno.")
-            return
-        await bot.send_message(chat_id=message.chat.id, text=mensaje_final)
-    
+        await message.answer(_format_kv_for_telegram("Estado del sistema", result), parse_mode=None)
+
 
 @app.get("/health/sap")
 def health_sap() -> Dict[str, Any]:
@@ -501,31 +561,24 @@ def run_resync_fallback(_: None = Depends(_require_admin_token)) -> Dict[str, An
 
 if router and Command:
     @router.message(Command("last_status"))
-    async def last_status_telegram(message: Message):
+    async def last_status_telegram(message: Message) -> None:
         result = status_latest()
-        text = str(result)
-        patron = r"'([^']+)':\s*([^,}]+)"
-        matches = re.findall(patron, text)
-        
-        lineas = []
-        for clave, valor in matches:
-            valor_limpio = valor.strip("'\" ")
-            clave_fmt = clave.replace('_', ' ').title()
-            valor_safe = valor_limpio.replace('<', '&lt;').replace('>', '&gt;')
-            
-            lineas.append(f"• <b>{clave_fmt}:</b> {valor_safe}")
+        await message.answer(_format_kv_for_telegram("Ultimo estado", result), parse_mode=None)
 
-        mensaje_final = "<b>Estado del Sistema</b>\n\n" + "\n".join(lineas)
-        
-        if bot is None:
-            await message.answer("Telegram bot no está configurado.")
+    @router.message(Command("ask"))
+    async def ask_telegram(message: Message) -> None:
+        raw_text = (message.text or "").strip()
+        question = _extract_command_argument(raw_text, "ask")
+        await _handle_telegram_analysis(message, question)
+
+    @router.message()
+    async def free_text_telegram(message: Message) -> None:
+        raw_text = (message.text or "").strip()
+        if not raw_text or raw_text.startswith("/"):
             return
+        await _handle_telegram_analysis(message, raw_text)
 
-        await bot.send_message(
-            chat_id=message.chat.id, 
-            text=mensaje_final, 
-            parse_mode="HTML" 
-        )
+
 @app.get("/alerts/recent", response_model=list[RecentAlertResponse])
 def alerts_recent(limit: int = Query(default=50, ge=1, le=200)) -> list[Dict[str, Any]]:
     if not _storage_status["ready"]:
