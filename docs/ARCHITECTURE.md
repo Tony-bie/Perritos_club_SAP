@@ -200,7 +200,7 @@ Las rutas admin requieren token (`Authorization: Bearer ...` o `X-API-Key`).
 
 ## Chatbot / Telegram
 
-El bot puede responder preguntas operativas usando instantáneas equivalentes a estas rutas:
+El bot de Telegram vive en `backend/api/http/application.py` y usa `backend/services/chatbot/interpreter.py` para interpretar preguntas con LiteLLM. La idea no es que el modelo "adivine": el backend le entrega un contexto estructurado con resumen operativo e instantáneas equivalentes a estas rutas:
 
 - `/health`
 - `/history/status`
@@ -211,7 +211,25 @@ El bot puede responder preguntas operativas usando instantáneas equivalentes a 
 - `/runs/recent`
 - `/health/sap`
 
-Si falla el LLM o falta configuración, responde con respuesta local basada en el mismo resumen operativo.
+El prompt obliga al modelo a responder en español, usar solo ese contexto, mencionar la ruta que respalda la conclusión cuando sea útil y mantener foco operativo. La salida se marca como `Fuente: llm`.
+
+Si `LLM_ENABLED=false`, falta `LLM_PROVIDER_MODEL`, LiteLLM no está instalado o el proveedor falla, el bot no se rompe: responde con un resumen local basado en el mismo contexto y marca `Fuente: fallback`.
+
+Variables principales:
+
+```text
+TOKEN_BOT_TELEGRAM=...
+CHAT_IDS=...
+TELEGRAM_CHATBOT_ENABLED=true
+LLM_ENABLED=true
+LLM_PROVIDER_MODEL=groq/llama-3.1-8b-instant
+LLM_API_KEY=...
+LLM_BASE_URL=
+LLM_TEMPERATURE=0.2
+LLM_MAX_TOKENS=400
+```
+
+`LLM_BASE_URL` es opcional y sirve para un proxy LiteLLM, gateway propio o endpoint local compatible. LiteLLM está incluido en `requirements.txt`.
 
 ---
 

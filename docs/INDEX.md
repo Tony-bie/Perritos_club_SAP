@@ -32,7 +32,7 @@ Incluye:
 - Variables `.env`.
 - Ejecución local con SQLite.
 - Ejecución con SAP HANA Cloud.
-- Telegram/chatbot.
+- Telegram/chatbot con LiteLLM y fallback local.
 - Solución de problemas.
 
 Tiempo estimado: 10 minutos para local; 15 a 30 minutos con HANA.

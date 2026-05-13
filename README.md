@@ -15,6 +15,7 @@ El sistema combina:
 - Modelo HANA ML desde `WINDOW_FEATURES` cuando hay suficientes features limpias.
 - SQLite como fallback/respaldo local cuando HANA no está disponible.
 - Resincronización automática o manual del fallback cuando HANA vuelve.
+- Chatbot Telegram con LiteLLM para explicar el estado usando las rutas útiles del backend.
 
 ## Documentación
 
@@ -87,6 +88,26 @@ python tools/walkthrough_demo.py
 | `/api/admin/cleanup` | POST | Limpieza por retención |
 
 Las rutas administrativas usan `Authorization: Bearer <token>` o `X-API-Key: <token>`.
+
+## Telegram y LiteLLM
+
+El bot puede mandar estado y responder preguntas operativas con `/ask`. Usa LiteLLM para llamar al proveedor configurado, pero no depende ciegamente del LLM: si LiteLLM está deshabilitado, no está instalado, no tiene modelo/API key o el proveedor falla, responde con un resumen local.
+
+```text
+TOKEN_BOT_TELEGRAM=...
+CHAT_IDS=123456789
+TELEGRAM_CHATBOT_ENABLED=true
+LLM_ENABLED=true
+LLM_PROVIDER_MODEL=groq/llama-3.1-8b-instant
+LLM_API_KEY=...
+LLM_BASE_URL=
+LLM_TEMPERATURE=0.2
+LLM_MAX_TOKENS=400
+```
+
+Modelos típicos en `LLM_PROVIDER_MODEL`: `groq/llama-3.1-8b-instant`, `gemini/gemini-1.5-flash` o el nombre que acepte tu gateway LiteLLM. `LLM_BASE_URL` solo se usa para proxy propio o gateway local.
+
+El contexto que recibe el modelo sale de `/health`, `/history/status`, `/status/latest`, `/dashboard/summary`, `/alerts/recent`, `/metrics/windows`, `/runs/recent` y `/health/sap`. La respuesta final indica `Fuente: llm` o `Fuente: fallback`.
 
 ## Comandos Útiles
 

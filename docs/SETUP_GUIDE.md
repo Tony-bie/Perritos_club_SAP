@@ -196,6 +196,8 @@ curl http://localhost:8000/health
 
 ## Telegram y Chatbot
 
+El chatbot usa Telegram para la interfaz y LiteLLM para conectar con el proveedor de modelo. `requirements.txt` ya incluye `aiogram` y `litellm`.
+
 Variables principales:
 
 ```text
@@ -203,12 +205,20 @@ TOKEN_BOT_TELEGRAM=...
 CHAT_IDS=123456789,987654321
 TELEGRAM_CHATBOT_ENABLED=true
 LLM_ENABLED=true
-LLM_PROVIDER_MODEL=...
+LLM_PROVIDER_MODEL=groq/llama-3.1-8b-instant
 LLM_API_KEY=...
 LLM_BASE_URL=
 LLM_TEMPERATURE=0.2
 LLM_MAX_TOKENS=400
 ```
+
+Ejemplos de `LLM_PROVIDER_MODEL`:
+
+- `groq/llama-3.1-8b-instant`
+- `gemini/gemini-1.5-flash`
+- Un modelo servido por tu proxy LiteLLM o gateway local.
+
+`LLM_BASE_URL` se deja vacío para proveedores soportados directamente por LiteLLM. Llénalo solo si usas un proxy propio, gateway local o endpoint compatible.
 
 Comandos del bot:
 
@@ -216,9 +226,14 @@ Comandos del bot:
 - `/last_status`
 - `/ask qué está pasando con los registros?`
 
-El chatbot usa instantáneas de rutas útiles como `/health`, `/history/status`, `/status/latest`, `/dashboard/summary`, `/alerts/recent`, `/metrics/windows`, `/runs/recent` y `/health/sap`.
+El chatbot arma contexto con instantáneas de rutas útiles como `/health`, `/history/status`, `/status/latest`, `/dashboard/summary`, `/alerts/recent`, `/metrics/windows`, `/runs/recent` y `/health/sap`.
 
-Si LiteLLM o el proveedor fallan, responde con un resumen local basado en esos mismos datos.
+La respuesta indica la fuente:
+
+- `Fuente: llm`: LiteLLM respondió con el modelo configurado.
+- `Fuente: fallback`: el sistema usó resumen local porque LiteLLM está apagado, mal configurado, no instalado o el proveedor falló.
+
+El resumen local incluye alertas recientes, alertas de alta severidad, ventanas anómalas, último estado de ingesta, riesgo más reciente y pendientes de SQLite fallback.
 
 ---
 
