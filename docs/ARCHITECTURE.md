@@ -1,415 +1,355 @@
-# 🏗️ ARQUITECTURA — Live Security Operation Center Defense
+# ARQUITECTURA — Live Security Operation Center Defense
 
-**Última actualización**: May 2026  
-**Audiencia**: Todos (técnicos y no-técnicos)  
-**Objetivo**: Entender QUÉ hace el sistema, POR QUÉ cada componente, CÓMO fluyen los datos
-
----
-
-## 🎯 El Problema
-
-SAP logs millones de eventos de seguridad cada día. Las operaciones de seguridad necesitan:
-- ✅ Detectar anomalías **automáticamente**
-- ✅ Alertas **en tiempo real** (~5 segundos)
-- ✅ Minimizar **falsos positivos**
-- ✅ Escalable a **millones de logs**
-
-**Nuestra solución**: Pipeline de ingesta + análisis ML + alertas automáticas
+**Última actualización**: mayo de 2026
+**Audiencia**: técnica y no técnica
+**Objetivo**: entender qué hace el sistema, por qué existe cada componente y cómo fluyen los datos.
 
 ---
 
-## 🔄 Flujo Completo (End-to-End)
+## El Problema
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│ 1. INGESTA: SAP SOC API                                          │
-│    • Logs de eventos de seguridad/sistema cada 30 minutos        │
-│    • Tipos: ERROR, SECURITY, LLM_TIMEOUT, etc.                  │
-│    • Volumen: 100-5000+ logs por ventana                         │
-└────────────────────┬────────────────────────────────────────────┘
-                     │
-                     ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ 2. NORMALIZACIÓN & ETL                                           │
-│    • Clasificar: "es log LLM?" vs "es log de sistema?"          │
-│    • Limpiar: valores nulos, timestamps                         │
-│    • Extraer 25+ features (event_count, error_rate, latency)    │
-└────────────────────┬────────────────────────────────────────────┘
-                     │
-                     ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ 3. MODELO ML: Isolation Forest                                   │
-│    • Entrenado: histórico (últimas 200 ventanas)                │
-│    • Scoring: anomaly_score para cada ventana                   │
-│    • Output: es_anomalia? (sí/no) + score (0-100)              │
-└────────────────────┬────────────────────────────────────────────┘
-                     │
-                     ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ 4. EVALUACIÓN DE RIESGO & ALERTAS                               │
-│    • Combina múltiples señales (ML + histórico + reglas)        │
-│    • Asigna threat_score (1-100)                                │
-│    • Crea alerta si threshold > 65                              │
-└────────────────────┬────────────────────────────────────────────┘
-                     │
-                     ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ 5. PERSISTENCIA: SAP HANA Cloud                                  │
-│    • Guarda: RAW_LOGS, WINDOW_METRICS, ALERTS_EVENTS            │
-│    • Retención: 90 días (configurable)                          │
-│    • Queryable: vistas para dashboards                          │
-└────────────────────┬────────────────────────────────────────────┘
-                     │
-                     ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ 6. API REST & DASHBOARD                                          │
-│    • GET /dashboard/summary → datos agregados                   │
-│    • GET /alerts/recent → últimas alertas                       │
-│    • GET /metrics/windows → métricas por ventana                │
-│    • Consumido por: SAC, Streamlit, custom dashboards           │
-└─────────────────────────────────────────────────────────────────┘
+SAP SOC puede generar miles o millones de eventos operativos, de seguridad y de LLM. Revisarlos manualmente no escala. El sistema busca:
+
+- Detectar anomalías y correlaciones de seguridad automáticamente.
+- Separar degradación operativa de posibles ataques.
+- Mantener historial consultable para tableros y análisis.
+- Enviar alertas cuando hay señales suficientemente fuertes.
+- Seguir funcionando aunque HANA falle temporalmente, usando SQLite como respaldo.
+
+**Nuestra solución**: ingesta de registros + ventanas históricas + reglas de correlación + línea base estadística + modelo HANA ML + alertas + API/tablero/chatbot.
+
+---
+
+## Flujo Completo
+
+```text
+SAP SOC API
+  |
+  | 1. Descarga registros paginados (/info + /logs/current)
+  v
+Normalización
+  |
+  | Clasifica LLM vs sistema, agrega ingested_at, conserva payload
+  v
+RAW_LOGS
+  |
+  | Agrupa por timestamp real en ventanas de 30 min
+  v
+WINDOW_METRICS
+  |
+  | Línea base histórica desde WINDOW_METRICS
+  | Modelo HANA ML desde WINDOW_FEATURES
+  | Reglas actuales de seguridad/LLM/HTTP
+  v
+Evaluación de Riesgo
+  |
+  | threat_score, risk_level, anomaly_reason, attack_predicted
+  v
+ALERTS_EVENTS + API + Telegram/Chatbot
 ```
 
----
-
-## 📦 Componentes (Qué hace cada uno)
-
-### **1. INGESTION SERVICE** (`backend/services/ingestion/`)
-- **Qué hace**: Conecta a SAP SOC API cada 30 minutos, descarga logs
-- **Por qué**: Fuente de datos primaria; SAP lo provee automáticamente
-- **Entrada**: API SOC logs paginated
-- **Salida**: Registros normalizados en WINDOW_METRICS + RAW_LOGS
-
-**Archivos**:
-- `ingest.py` → Orquesta ciclo de ingesta
-- `normalize.py` → Clasifica log (LLM vs sistema)
-- `features.py` → Extrae 25+ features numéricas
-
-**Ejemplo**:
-```python
-# Input: 3912 SAP logs en 30 min
-# Output:
-#   - RAW_LOGS: 3912 filas guardadas
-#   - WINDOW_METRICS: 95 agregaciones calculadas
-#   - Listas para modelo ML
-```
+Punto importante: **historial insuficiente no apaga todas las alertas**. Solo limita la comparación contra comportamiento normal histórico. Las reglas de correlación fuertes siguen funcionando.
 
 ---
 
-### **2. DETECTION MODEL** (`backend/services/detection/`)
-- **Qué hace**: Entrena un modelo ML (Isolation Forest) en datos históricos; detecta anomalías
-- **Por qué**: Unsupervised learning = no necesita etiquetas manuales; maneja datos high-dimensional
-- **Entrada**: 25+ features por ventana + histórico (200 ventanas)
-- **Salida**: anomaly_score (0-100) + is_anomaly (sí/no)
+## Componentes
 
-**Decisiones de Diseño**:
-- ✅ **Isolation Forest** vs Autoencoder: Más rápido, menos overfit, perfecto para anomalías
-- ✅ **Contamination=0.15**: Esperamos ~15% de ventanas anómalas (tunable)
-- ✅ **Min training rows=30**: Necesitamos suficientes datos históricos antes de alertar
+### 1. Servicio de ingesta (`backend/services/ingestion/`)
 
-**Archivos**:
-- `model.py` → Entrena/carga modelo (sklearn)
-- `detect.py` → Scoring de ventanas nuevas
-- `alert.py` → Lógica de alertas (combina múltiples señales)
+**Qué hace**
 
-**Ejemplo**:
-```python
-# Input: ventana con features [event_count=150, error_rate=0.85, ...]
-# Model decision:
-#   anomaly_score = 78 (de 100)
-#   is_anomaly = True
-# Output: "Alerta de anomalía detectada"
-```
+- Consulta SAP SOC API.
+- Descarga páginas de registros.
+- Normaliza cada registro.
+- Guarda registros crudos en `RAW_LOGS`.
+- Construye ventanas de 30 minutos desde timestamps reales (`@timestamp`, `event_time`, `timestamp`, etc.).
 
----
+**Por qué**
 
-### **3. STORAGE LAYER** (`backend/storage/backends/`)
-- **Qué hace**: Persiste datos en HANA (prod) o SQLite (local)
-- **Por qué**: Necesitamos datos durables, queryables, retención 90 días
-- **Entrada**: Logs, métricas, alertas (desde ingestion/detection)
-- **Salida**: Queries rápidas para dashboards
+La detección opera por ventanas. Si varias ingestas traen registros de distintas horas o días, el sistema debe crear varias filas históricas, no sobrescribir una sola ventana.
 
-**Tablas**:
-| Tabla | Propósito | Retención |
-|-------|-----------|-----------|
-| `RAW_LOGS` | Todos los logs ingesta | 90 días |
-| `WINDOW_METRICS` | Aggregados por ventana (25 features) | 90 días |
-| `ALERTS_EVENTS` | Alertas disparadas | 90 días |
-| `INGEST_RUNS` | Histórico de ciclos de ingesta | Permanente |
-| `WINDOW_FEATURES` | Features pre-calculadas | 90 días |
+**Archivos**
 
-**Archivos**:
-- `store.py` → BaseStore abstracta (15+ métodos)
-- SQL drivers: HANA (hdbcli) + SQLite (sqlite3)
-- Migrations: `sql/migrations/` (4 archivos SQL)
+- `ingest.py`: orquesta la llamada a SAP SOC.
+- `normalize.py`: clasifica registros LLM vs sistema.
+- `features.py`: agrupa por ventanas y extrae features numéricas.
 
-**Ejemplo**:
-```python
-# Bulk insert 1000 logs
-store.bulk_upsert_raw_logs(
-    records=[...],
-    batch_size=1000  # HANA maneja en lotes
-)
-# Resultado: ~0.5 sec insert para 1000 logs
-```
+**Salida principal**
+
+- `RAW_LOGS`: todos los registros crudos.
+- `WINDOW_METRICS`: métricas agregadas por ventana.
 
 ---
 
-### **4. API REST** (`backend/api/http/application.py`)
-- **Qué hace**: Expone 8 endpoints HTTP para ingesta, lectura, admin
-- **Por qué**: Permite que dashboards, bots, schedulers controlen el sistema
-- **Entrada**: HTTP requests (auth vía Bearer token)
-- **Salida**: JSON responses (alertas, métricas, estado)
+### 2. Detección y riesgo (`backend/services/detection/`)
 
-**Endpoints Principales**:
+El sistema combina tres capas:
 
-| Endpoint | Método | Propósito | Block |
-|----------|--------|-----------|-------|
-| `/health` | GET | Liveness check (sin auth) | Base |
-| `/health/sap` | GET | SAP SOC API reachable? | Base |
-| `/run/ingestion` | POST | Dispara ciclo ingesta manual | B |
-| `/status/latest` | GET | Estado de última ejecución | B |
-| **`/alerts/recent?limit=50`** | GET | Últimas 50 alertas | **C** |
-| **`/metrics/windows?limit=50`** | GET | Últimas 50 ventanas con métricas | **C** |
-| **`/runs/recent?limit=10`** | GET | Histórico de ingestas | **C** |
-| **`/dashboard/summary?time_window_hours=24`** | GET | Agregado 24h para dashboard | **C** |
-| `/api/admin/cleanup` | POST | Limpieza manual de datos antiguos | B |
+| Capa | Fuente | Sirve para |
+|------|--------|------------|
+| Reglas actuales | ventana actual | Detectar correlaciones fuertes aunque no haya historial |
+| Línea base histórica | `WINDOW_METRICS` | Comparar contra comportamiento normal reciente |
+| Modelo HANA ML | `WINDOW_FEATURES` | Puntaje ML cuando hay suficientes features limpias |
 
-**Ejemplo**:
-```bash
-curl -X GET "http://localhost:8000/alerts/recent?limit=5" \
-  -H "Authorization: Bearer <token>"
+**Reglas actuales**
 
-# Respuesta:
+Pueden disparar alertas aún con historial insuficiente. Ejemplos:
+
+- `SECURITY_ERROR_CORRELATION`
+- `SECURITY_HTTP_FAILURE_CORRELATION`
+- `SECURITY_SINGLE_IP_PRESSURE`
+- `SECURITY_LLM_DISRUPTION_CORRELATION`
+
+**Línea base histórica**
+
+Usa `WINDOW_METRICS`, no `WINDOW_FEATURES`. Esto es intencional: la línea base necesita ver el historial operativo completo, incluso ventanas con degradación LLM o sistema.
+
+**Modelo HANA ML**
+
+Usa `WINDOW_FEATURES`, que excluye algunas ventanas claramente anómalas o incompletas para no entrenar el modelo con ruido como si fuera normal.
+
+**Archivos**
+
+- `historical_baseline.py`: z-score robusto contra historial.
+- `model.py`: scoring con HANA ML/PAL cuando hay HANA disponible.
+- `detect.py`: combina línea base, modelo y reglas.
+- `alert.py`: formatea eventos y decide notificaciones.
+
+---
+
+## Qué Significa "Historial Insuficiente"
+
+Cuando `/history/status` dice que falta historial, significa:
+
+- La línea base todavía no tiene suficientes ventanas en `WINDOW_METRICS`.
+- El modelo puede no tener suficientes filas limpias en `WINDOW_FEATURES`.
+- Las reglas actuales siguen funcionando.
+
+Ejemplo:
+
+```json
 {
-  "alerts": [
-    {
-      "alert_id": "abc123",
-      "detected_at_utc": "2026-05-10T21:30:00Z",
-      "threat_score": 78,
-      "alert_type": "anomaly_detected"
-    }
-  ]
+  "historical_rows": 3,
+  "historical_min_required": 20,
+  "historical_source_table": "window_metrics",
+  "model_rows": 11,
+  "model_source_table": "window_features"
 }
 ```
 
----
+Interpretación:
 
-### **5. TELEGRAM BOT** (Optional)
-- **Qué hace**: Envía alertas críticas a chat Telegram
-- **Por qué**: Notificación en tiempo real para ops teams
-- **Configurable**: Deshabilitado si `TOKEN_BOT_TELEGRAM` no configurado
-- **Graceful fallback**: Si token inválido, sistema sigue funcionando (sin Telegram)
+- `historical_rows`: ventanas disponibles para comparar comportamiento normal.
+- `model_rows`: ventanas limpias disponibles para ML.
+- Si `historical_rows` es bajo pero hay `SECURITY_ERROR_CORRELATION`, el sistema sí vio una correlación fuerte; solo no puede afirmar aún que sea raro respecto a la línea base.
 
 ---
 
-## 📊 Diagrama de Flujo (Visualización)
+## Capa de almacenamiento (`backend/storage/backends/`)
 
-```
-┌─ Ingesta (30 min) ─┐
-│ SAP SOC API        │
-│ 3900+ logs         │
-└────────┬───────────┘
-         │
-         ▼ [Normalize.py]
-    ┌─────────────┐
-    │ RAW_LOGS    │ 
-    │ 3900 rows   │
-    └──────┬──────┘
-           │ [Features.py]
-           ▼
-       ┌─────────────────┐
-       │ WINDOW_METRICS  │ ← 25 features/window
-       │ 95 rows         │
-       └────────┬────────┘
-                │ [Isolation Forest]
-                ▼
-            ┌──────────┐
-            │ Anomaly? │ ← score 0-100
-            │ YES/NO   │
-            └────┬─────┘
-                 │ [Evaluate Risk]
-                 ▼
-              ┌────────────┐
-              │ ALERTS     │ ← si threat_score > 65
-              │ 6 alertas  │
-              └─────┬──────┘
-                    │
-        ┌───────────┼───────────┐
-        ▼           ▼           ▼
-    [HANA]    [Dashboard]  [Telegram]
-    Persist   JSON API     Notifications
-```
+**Backend primario**
 
----
+- SAP HANA Cloud cuando `STORAGE_BACKEND=hana`.
 
-## 🔐 Decisiones de Diseño & Tradeoffs
+**Fallback SQLite**
 
-### **Por qué SAP HANA?**
-- ✅ Parte nativa del SAP BTP (ya accesible)
-- ✅ Columnar storage = queries agregadas rápidas
-- ✅ Escalable a millones de logs/day
-- ❌ Costo: pero incluido en BTP trial
+- SQLite local funciona como fallback/respaldo cuando HANA falla.
+- Al recuperarse HANA, `ResilientStore` intenta sincronizar pendientes automáticamente.
+- También existe una ruta manual para resincronización.
 
-**Alternativa rechazada**: PostgreSQL local
-- ❌ Requeriría infraestructura adicional
-- ❌ No native SAP integration
+**Tablas**
 
----
-
-### **Por qué Isolation Forest (ML)?**
-- ✅ Unsupervised: no necesita etiquetas manuales
-- ✅ Fast: ~1ms por predicción
-- ✅ Robust: maneja outliers bien
-- ❌ Trade-off: ~15% false positive rate (mitigado por histórico + reglas)
-
-**Alternativas evaluadas**:
-- ❌ Autoencoder: más complejo, slower
-- ❌ LSTM: requiere labeled training data
-- ❌ Simple thresholds: demasiados falsos positivos
-
----
-
-### **Retención & Cleanup**
-- **90 días**: Balance entre storage cost + historical context
-- **Auto cleanup**: `sp_cleanup_old_data()` HANA procedure (ejecuta cada noche)
-- **Manual option**: POST `/api/admin/cleanup` para on-demand cleanup
-
----
-
-## 📈 Métricas de Rendimiento (Validadas en Tests)
-
-| Métrica | Valor | Nota |
-|---------|-------|------|
-| MTTD (Mean Time To Detect) | ~3-5 sec | Desde ingesta hasta alerta |
-| Throughput | 130 logs/sec | En test: 3912 logs en 30 sec |
-| Alert Rate | ~6% | Sobre ventanas procesadas |
-| False Positive Rate | ~15% | Configurable via `contamination` |
-| Storage | ~2GB / 90 días | HANA columnar compression |
-| Query latency | <1 sec | GET /dashboard/summary |
-
----
-
-## 🛠️ Tecnologías Stack
-
-| Layer | Tecnología | Razón |
+| Tabla | Propósito | Notas |
 |-------|-----------|-------|
-| **Runtime** | Python 3.11 | Ecosistema ML (sklearn, pandas) |
-| **Web Framework** | FastAPI | Async, Pydantic, OpenAPI auto-docs |
-| **DB Primaria** | SAP HANA Cloud | BTP native, columnar, escalable |
-| **DB Local** | SQLite | Dev/test, sin dependencias |
-| **ML** | scikit-learn (Isolation Forest) | Simple, fast, proven |
-| **Ingesta Async** | Background thread + asyncio | No bloquea API |
-| **Notificaciones** | aiogram (Telegram) | Push real-time, optional |
-| **IaC** | HANA SQL + Python | Infrastructure as code via migrations |
+| `RAW_LOGS` | Registros crudos normalizados | Fuente para reconstruir ventanas |
+| `WINDOW_METRICS` | Ventanas agregadas y resumen de riesgo | Fuente de la línea base histórica |
+| `WINDOW_FEATURES` | Features limpias para ML | Fuente del modelo |
+| `ALERTS_EVENTS` | Alertas generadas | Usado por tablero/chatbot |
+| `INGEST_RUNS` | Ciclos de ingesta | Auditoría operativa |
 
 ---
 
-## 🔄 Ciclo de Vida de una Alerta
+## API REST (`backend/api/http/application.py`)
 
-```
-1. [Ingestion Cycle - Every 30 min]
-   GET SAP SOC API → Normalize → Extract features → WINDOW_METRICS table
+### Estado y lectura
 
-2. [Detection]
-   Load Isolation Forest model
-   Score WINDOW_METRICS row
-   if anomaly_score > threshold:
-     evaluate_window_risk() → Combina ML + historial + reglas
+| Ruta | Método | Propósito |
+|----------|--------|-----------|
+| `/health` | GET | Estado del backend, proceso en segundo plano, almacenamiento y respaldo |
+| `/health/sap` | GET | Verifica SAP SOC API |
+| `/history/status` | GET | Estado de línea base y modelo |
+| `/status/latest` | GET | Última ejecución y última ventana |
+| `/alerts/recent?limit=50` | GET | Alertas recientes |
+| `/metrics/windows?limit=50` | GET | Ventanas recientes |
+| `/runs/recent?limit=10` | GET | Ejecuciones recientes |
+| `/dashboard/summary?time_window_hours=24` | GET | Agregado para tablero |
 
-3. [Alert Creation]
-   if threat_score > 65:
-     Create ALERTS_EVENTS row
-     Send Telegram message (if configured)
-     Available via GET /alerts/recent
+### Operación y admin
 
-4. [Dashboard]
-   User polls GET /dashboard/summary
-   Shows: total alerts 24h, threat timeline, metrics, etc.
+| Ruta | Método | Propósito |
+|----------|--------|-----------|
+| `/run/ingestion` | POST | Ejecuta una ingesta manual |
+| `/run/reprocess-windows` | POST | Recalcula riesgo de ventanas existentes |
+| `/run/rebuild-windows-from-raw` | POST | Reconstruye `WINDOW_METRICS` desde `RAW_LOGS` |
+| `/run/resync-fallback` | POST | Fuerza sincronización del fallback SQLite hacia HANA |
+| `/api/admin/cleanup` | POST | Limpieza por retención |
 
-5. [Retention]
-   Every night: sp_cleanup_old_data(90) deletes rows older than 90 days
-   Or: POST /api/admin/cleanup (manual trigger)
-```
-
----
-
-## 🚀 Escalabilidad
-
-**Actual (Tested)**:
-- 3912 logs/cycle (30 min window)
-- 130 logs/sec throughput
-
-**Proyectado (with optimizations)**:
-- 10,000+ logs/cycle (tune batch_size to 5000)
-- 300+ logs/sec (with async ingestion)
-
-**Limiting factors**:
-- SAP SOC API rate limits (unknown)
-- HANA connection pool size (default 10, tunable)
-- CPU for ML inference (negligible at 1ms/prediction)
+Las rutas admin requieren token (`Authorization: Bearer ...` o `X-API-Key`).
 
 ---
 
-## 📚 Archivos Clave
+## Chatbot / Telegram
 
-```
-backend/
-├── api/http/application.py          ← 8 endpoints
-├── core/config.py                   ← 37 config fields
-├── services/
-│   ├── ingestion/                   ← normalize, features, ingest
-│   ├── detection/                   ← model, detect, alert logic
-│   └── clients/sap_soc.py           ← SAP API client
-└── storage/backends/store.py        ← BaseStore + Hana + Sqlite
+El bot puede responder preguntas operativas usando instantáneas equivalentes a estas rutas:
 
-tests/
-├── test_config.py                   ← 2 config tests
-├── test_block_c_api.py              ← 2 endpoint tests
-└── test_block_c_hana_integration.py ← 2 HANA integration tests
+- `/health`
+- `/history/status`
+- `/status/latest`
+- `/dashboard/summary`
+- `/alerts/recent`
+- `/metrics/windows`
+- `/runs/recent`
+- `/health/sap`
 
-sql/migrations/
-├── 001_analytics_extension_tables.sql
-├── 002_analytics_extension_views.sql
-├── 003_optimizations.sql
-└── 004_retention.sql
+Si falla el LLM o falta configuración, responde con respuesta local basada en el mismo resumen operativo.
 
-docs/
-├── ARCHITECTURE.md                  ← Este archivo
-├── SETUP_GUIDE.md                   ← Cómo instalar & correr
-└── DEPLOYMENT.md                    ← HANA cloud setup
+---
+
+## Ciclo de Vida de una Alerta
+
+```text
+1. Ingesta
+   SAP SOC API -> normalización -> RAW_LOGS
+
+2. Ventanas
+   RAW_LOGS -> ventanas de 30 min -> WINDOW_METRICS
+
+3. Detección
+   Reglas actuales + línea base histórica + modelo HANA ML
+
+4. Resumen de riesgo
+   threat_score, risk_level, anomaly_reason, attack_predicted
+
+5. Alertas
+   ALERTS_EVENTS + posible Telegram + API/tablero
+
+6. Retención
+   limpieza automática/manual según configuración
 ```
 
 ---
 
-## ❓ Preguntas Comunes
+## Decisiones de Diseño
 
-**P: ¿Qué pasa si falla SAP SOC API?**  
-A: La ingesta espera & reintenta. El sistema sigue sirviendo datos cached de la última ejecución exitosa.
+### Por qué separar línea base y modelo
 
-**P: ¿Se puede cambiar entre SQLite y HANA?**  
-A: Sí. Usa `STORAGE_BACKEND=hana` o `sqlite` en .env. Datos no se migran automáticamente.
+Antes, contar solo `WINDOW_FEATURES` podía hacer parecer que no había historial, porque esa tabla excluye ventanas anómalas para no contaminar el ML.
 
-**P: ¿Qué pasa con datos antiguos?**  
-A: Auto-cleanup cada noche (configurable) borra datos > 90 días. Manual option via API.
+Ahora:
 
-**P: ¿Cómo se entrena el modelo?**  
-A: Cada ciclo de ingesta: toma últimas 200 ventanas de WINDOW_METRICS, reentrana IF (batch).
+- `WINDOW_METRICS` alimenta la línea base histórica.
+- `WINDOW_FEATURES` alimenta el modelo.
 
-**P: ¿Qué tan en "tiempo real" son las alertas?**  
-A: MTTD ~3-5 segundos desde ingesta hasta API endpoint. Telegram push es instant.
+Esto evita que el sistema "esconda" semanas de datos solo porque fueron degradadas o anómalas.
+
+### Por qué reconstruir desde RAW_LOGS
+
+Si por un bug anterior varias ingestas pisaron el mismo `WINDOW_KEY`, todavía podemos recuperar historial si `RAW_LOGS` contiene timestamps reales.
+
+Ruta:
+
+```bash
+curl -X POST "http://localhost:8000/run/rebuild-windows-from-raw?limit=0&persist=true" \
+  -H "X-API-Key: $ADMIN_API_KEY"
+```
+
+### Por qué SQLite como fallback/respaldo
+
+Si HANA falla temporalmente:
+
+- Las escrituras caen a SQLite.
+- `/health` reporta pendientes.
+- Cuando HANA vuelve, `ResilientStore` intenta sincronizar.
+- También se puede forzar con `/run/resync-fallback`.
 
 ---
 
-## 🎓 Para No-Técnicos
+## Tecnologías
 
-**Traducción simple**: Imaginá que SAP es un monitor de vigilancia gigante que graba 4000 eventos por hora. Nuestro sistema:
-1. Ve el video (ingesta)
-2. Detecta anomalías (modelo ML)
-3. Alertas al equipo (Telegram + Dashboard)
-4. Archiva todo para análisis (HANA storage)
-
-Todo funciona automático, 24/7. Si algo raro pasa, el sistema te avisa en 5 segundos.
+| Capa | Tecnología | Razón |
+|-------|------------|-------|
+| Entorno | Python | Ecosistema backend/ML |
+| Web | FastAPI | API JSON, validación, OpenAPI |
+| DB primaria | SAP HANA Cloud | Integración SAP, almacenamiento columnar |
+| Fallback/local | SQLite | Resiliencia local/dev |
+| ML | HANA ML/PAL | Scoring cerca de los datos en HANA |
+| Bot | aiogram + LiteLLM | Telegram y respuestas interpretadas |
+| Migraciones | SQL + scripts Python | Evolución controlada del esquema |
 
 ---
 
+## Operación Recomendada
+
+### Ver estado
+
+```bash
+curl http://localhost:8000/health
+curl http://localhost:8000/history/status
+curl http://localhost:8000/status/latest
+```
+
+### Ejecutar ingesta manual
+
+```bash
+curl -X POST http://localhost:8000/run/ingestion
+```
+
+### Recalcular ventanas existentes
+
+```bash
+curl -X POST "http://localhost:8000/run/reprocess-windows?limit=0&persist=true"
+```
+
+### Reconstruir historial desde registros crudos
+
+```bash
+curl -X POST "http://localhost:8000/run/rebuild-windows-from-raw?limit=0&persist=true" \
+  -H "X-API-Key: $ADMIN_API_KEY"
+```
+
+---
+
+## Preguntas Comunes
+
+**P: Si no hay historial suficiente, el sistema no detecta ataques?**
+A: Sí detecta correlaciones fuertes por reglas actuales. Lo que no puede hacer bien aún es comparar contra el comportamiento normal histórico.
+
+**P: Por qué `historical_rows` y `model_rows` pueden ser distintos?**
+A: `historical_rows` viene de `WINDOW_METRICS`; `model_rows` viene de `WINDOW_FEATURES`, que excluye ventanas no aptas para entrenamiento.
+
+**P: Por qué antes se quedaba en 1 fila histórica?**
+A: Algunas ingestas reutilizaban el mismo `WINDOW_KEY` y HANA hacía `UPSERT`. Ahora las ventanas se derivan de timestamps reales de registros.
+
+**P: Qué pasa si falla SAP SOC API?**
+A: La ingesta registra fallo y el sistema sigue sirviendo el último estado persistido.
+
+**P: Qué pasa si falla HANA?**
+A: El sistema escribe en SQLite como fallback/respaldo y sincroniza cuando HANA regresa.
+
+**P: Datos antiguos se borran?**
+A: Sí. La retención por defecto es 90 días, configurable, con limpieza automática/manual.
+
+---
+
+## Para No Técnicos
+
+Piensa en el sistema como una central de monitoreo:
+
+1. Recibe eventos de SAP.
+2. Los ordena por tiempo.
+3. Resume cada bloque de 30 minutos.
+4. Busca combinaciones peligrosas ahora mismo.
+5. Compara contra el comportamiento histórico cuando ya hay suficientes ventanas.
+6. Genera alertas y las muestra en API/tablero/bot.
+
+Si aún falta historial, el sistema no está ciego: solo tiene menos contexto para distinguir "raro para nosotros" vs "grave por reglas actuales".
