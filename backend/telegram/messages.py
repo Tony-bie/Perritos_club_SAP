@@ -351,6 +351,23 @@ if router and Command:
             text="\n".join(lines),
             parse_mode="HTML"
         )
+        
+if router and Command:
+    @router.message(Command("ask"))
+    async def ask_telegram(message: Message) -> None:
+        from backend.api.http import _extract_command_argument, _handle_telegram_analysis
+
+        raw_text = (message.text or "").strip()
+        question = _extract_command_argument(raw_text, "ask")
+        await _handle_telegram_analysis(message, question)
+
+    @router.message()
+    async def free_text_telegram(message: Message) -> None:
+        from backend.api.http import  _handle_telegram_analysis
+        raw_text = (message.text or "").strip()
+        if not raw_text or raw_text.startswith("/"):
+            return
+        await _handle_telegram_analysis(message, raw_text)
 
 
 async def run_bot() -> None:
