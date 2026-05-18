@@ -34,6 +34,7 @@ try:
     from aiogram.enums import ParseMode
     from aiogram.filters import Command
     from aiogram.types import Message
+    
 except ModuleNotFoundError:
     Bot = None
     Dispatcher = None
@@ -60,18 +61,6 @@ client = SAPSOCClient(
     max_retries=settings.max_retries,
     retry_backoff_seconds=settings.retry_backoff_seconds,
 )
-
-token = settings.token_bot_telegram
-chat_ids = settings.chat_ids
-bot: Bot | None = None
-if Bot and DefaultBotProperties and ParseMode and token:
-    try:
-        bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
-    except Exception as exc:
-        logger.warning("Telegram bot disabled due to invalid token: %s", exc)
-else:
-    logger.info("Telegram bot disabled: TOKEN_BOT_TELEGRAM is not configured")
-
 app = FastAPI(title="SAP SOC Backend", version="0.1.0")
 _stop_event = threading.Event()
 _worker_thread: threading.Thread | None = None
@@ -79,11 +68,6 @@ _storage_status: Dict[str, Any] = {
     "ready": False,
     "error": None,
 }
-
-router = Router(name=__name__) if Router else None
-dp = Dispatcher() if Dispatcher else None
-if dp and router:
-    dp.include_router(router)
 
 class CleanupRequest(BaseModel):
     retention_days: int = 90
@@ -318,25 +302,6 @@ async def health() -> Dict[str, Any]:
     if fallback_status.get("enabled"):
         status["fallback"] = fallback_status
     return status
-
-import re
-
-if router and Command:
-    @router.message(Command("health"))
-    async def health_telegram(message: Message):
-        result = await health()
-        text = str(result)
-        patron = r"'([^']+)':\s*([^,}]+)"
-        matches = re.findall(patron, text)
-        lineas = []
-        for clave, valor in matches:
-            valor_limpio = valor.strip("'\"")
-            lineas.append(f"• *{clave.replace('_', ' ').title()}... * {valor_limpio}")
-        mensaje_final = "*Estado del Sistema*\n\n" + "\n".join(lineas)
-        if bot is None:
-            await message.answer("Telegram bot no esta configurado en este entorno.")
-            return
-        await bot.send_message(chat_id=message.chat.id, text=mensaje_final)
     
 
 @app.get("/health/sap")
@@ -499,33 +464,6 @@ def run_resync_fallback(_: None = Depends(_require_admin_token)) -> Dict[str, An
         logger.exception("Fallback resync failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
 
-if router and Command:
-    @router.message(Command("last_status"))
-    async def last_status_telegram(message: Message):
-        result = status_latest()
-        text = str(result)
-        patron = r"'([^']+)':\s*([^,}]+)"
-        matches = re.findall(patron, text)
-        
-        lineas = []
-        for clave, valor in matches:
-            valor_limpio = valor.strip("'\" ")
-            clave_fmt = clave.replace('_', ' ').title()
-            valor_safe = valor_limpio.replace('<', '&lt;').replace('>', '&gt;')
-            
-            lineas.append(f"• <b>{clave_fmt}:</b> {valor_safe}")
-
-        mensaje_final = "<b>Estado del Sistema</b>\n\n" + "\n".join(lineas)
-        
-        if bot is None:
-            await message.answer("Telegram bot no está configurado.")
-            return
-
-        await bot.send_message(
-            chat_id=message.chat.id, 
-            text=mensaje_final, 
-            parse_mode="HTML" 
-        )
 @app.get("/alerts/recent", response_model=list[RecentAlertResponse])
 def alerts_recent(limit: int = Query(default=50, ge=1, le=200)) -> list[Dict[str, Any]]:
     if not _storage_status["ready"]:
@@ -586,13 +524,13 @@ def admin_cleanup(
 
 async def run() -> None:
     import uvicorn
+    from backend.telegram import run_bot 
 
     config = uvicorn.Config(app, host=settings.app_host, port=settings.app_port, reload=False)
     server = uvicorn.Server(config)
 
     tasks = [server.serve()]
-    if dp is not None and bot is not None:
-        tasks.append(dp.start_polling(bot))
+    tasks.append(run_bot())
     await asyncio.gather(*tasks)
 
 

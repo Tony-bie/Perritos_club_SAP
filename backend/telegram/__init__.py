@@ -1,0 +1,1 @@
+from .messages import bot, dp, run_bot

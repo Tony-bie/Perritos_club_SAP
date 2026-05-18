@@ -1,4 +1,4 @@
-from backend.api import app, run, dp, bot
+from backend.api import app, run
 import asyncio
     
 

@@ -1,5 +1,5 @@
 """API layer for the backend service."""
 
-from backend.api.http.application import app, run, bot, dp
+from backend.api.http.application import app, run
 
-__all__ = ["app", "run", "dp", "bot"]
+__all__ = ["app", "run"]
