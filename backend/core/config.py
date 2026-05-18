@@ -254,7 +254,7 @@ def _resolve_storage_backend() -> str:
     if configured:
         return configured
 
-    has_hana = bool(_get_hana_value("HANA_HOST", "SAP_HANA_HOST", default=""))
+    has_hana = bool(_get_hana_value("HANA_HOST", "SAP_HANA_HOST", "DB_HOST", default=""))
     return "hana" if has_hana else "sqlite"
 
 

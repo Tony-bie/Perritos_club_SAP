@@ -56,6 +56,19 @@ logger = logging.getLogger("sap_soc_backend")
 
 settings = load_settings()
 store = create_store(settings)
+if settings.storage_backend == "sqlite" and settings.hana_host:
+    logger.warning(
+        "SQLite storage backend selected even though HANA host is configured. "
+        "Check STORAGE_BACKEND and HANA/DB environment variables."
+    )
+logger.info(
+    "Storage configuration resolved. backend=%s hana_configured=%s schema=%s worker_enabled=%s poll_interval_minutes=%s",
+    settings.storage_backend,
+    bool(settings.hana_host and settings.hana_user),
+    settings.hana_schema,
+    settings.enable_worker,
+    settings.poll_interval_minutes,
+)
 client = SAPSOCClient(
     base_url=settings.sap_soc_base_url,
     token=settings.sap_soc_token,
@@ -226,6 +239,8 @@ def _build_health_status() -> Dict[str, Any]:
         "worker_enabled": settings.enable_worker,
         "worker_running": bool(_worker_thread and _worker_thread.is_alive()),
         "storage_backend": settings.storage_backend,
+        "hana_configured": bool(settings.hana_host and settings.hana_user),
+        "hana_schema": settings.hana_schema,
         "storage_ready": _storage_status["ready"],
         "storage_error": _storage_status["error"],
         "model_enabled": settings.model_enabled,
