@@ -126,9 +126,13 @@ Activa en `.env`:
 ```text
 ENABLE_WORKER=true
 POLL_INTERVAL_MINUTES=30
+SAP_SOC_MIN_REQUEST_INTERVAL_SECONDS=1.0
+SAP_SOC_MAX_RETRY_AFTER_SECONDS=300
+MAX_RETRIES=3
+RETRY_BACKOFF_SECONDS=2
 ```
 
-Al iniciar la API, se crea un proceso en segundo plano que ejecuta ciclos de ingesta.
+Al iniciar la API, se crea un proceso en segundo plano que ejecuta ciclos de ingesta. Las llamadas a SAP SOC se espacian para evitar bloqueos por tasa y, si SAP responde `429` con `Retry-After`, el cliente espera antes de reintentar.
 
 ---
 
@@ -326,6 +330,23 @@ curl -X POST http://localhost:8000/run/resync-fallback \
 ### SAP SOC responde 401/422
 
 Revisa `SAP_SOC_TOKEN` y `SAP_SOC_BASE_URL`.
+
+### SAP SOC responde 429 Too Many Requests
+
+El cliente respeta el header `Retry-After` y reintenta hasta `MAX_RETRIES`. Si el proveedor sigue bloqueando, sube el intervalo entre ciclos o entre peticiones:
+
+```text
+POLL_INTERVAL_MINUTES=45
+SAP_SOC_MIN_REQUEST_INTERVAL_SECONDS=2.0
+SAP_SOC_MAX_RETRY_AFTER_SECONDS=600
+```
+
+Después reinicia la API y valida con:
+
+```bash
+curl http://localhost:8000/health
+curl http://localhost:8000/status/latest
+```
 
 ### Las pruebas de HANA se saltan
 

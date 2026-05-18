@@ -20,6 +20,20 @@ class ConfigTests(unittest.TestCase):
             settings = load_settings()
 
         self.assertTrue(settings.enable_worker)
+        self.assertEqual(settings.sap_soc_min_request_interval_seconds, 1.0)
+        self.assertEqual(settings.sap_soc_max_retry_after_seconds, 300)
+
+    def test_sap_soc_rate_limit_settings_are_configurable(self) -> None:
+        env = {
+            "SAP_SOC_MIN_REQUEST_INTERVAL_SECONDS": "2.5",
+            "SAP_SOC_MAX_RETRY_AFTER_SECONDS": "120",
+        }
+
+        with patch.dict(os.environ, env, clear=True):
+            settings = load_settings()
+
+        self.assertEqual(settings.sap_soc_min_request_interval_seconds, 2.5)
+        self.assertEqual(settings.sap_soc_max_retry_after_seconds, 120)
 
     def test_db_host_auto_selects_hana_backend(self) -> None:
         env = {

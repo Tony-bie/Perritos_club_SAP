@@ -80,6 +80,8 @@ client = SAPSOCClient(
     timeout_seconds=settings.request_timeout_seconds,
     max_retries=settings.max_retries,
     retry_backoff_seconds=settings.retry_backoff_seconds,
+    min_request_interval_seconds=settings.sap_soc_min_request_interval_seconds,
+    max_retry_after_seconds=settings.sap_soc_max_retry_after_seconds,
 )
 app = FastAPI(title="SAP SOC Backend", version="0.1.0")
 _stop_event = threading.Event()
@@ -232,6 +234,9 @@ def _build_health_status() -> Dict[str, Any]:
         "storage_ready": _storage_status["ready"],
         "storage_error": _storage_status["error"],
         "model_enabled": settings.model_enabled,
+        "poll_interval_minutes": settings.poll_interval_minutes,
+        "sap_soc_min_request_interval_seconds": settings.sap_soc_min_request_interval_seconds,
+        "sap_soc_max_retry_after_seconds": settings.sap_soc_max_retry_after_seconds,
     }
     fallback_status = store.get_fallback_status()
     if fallback_status.get("enabled"):

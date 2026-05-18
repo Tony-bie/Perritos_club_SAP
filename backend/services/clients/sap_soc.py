@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import time
 from typing import Any, Dict, List
 
@@ -14,13 +16,18 @@ class SAPSOCClient:
         timeout_seconds: int = 30,
         max_retries: int = 3,
         retry_backoff_seconds: int = 2,
+        min_request_interval_seconds: float = 0.0,
+        max_retry_after_seconds: int = 300,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
         self.retry_backoff_seconds = retry_backoff_seconds
+        self.min_request_interval_seconds = max(0.0, float(min_request_interval_seconds))
+        self.max_retry_after_seconds = max(1, int(max_retry_after_seconds))
         self.session = requests.Session()
+        self._last_request_monotonic: float | None = None
 
     @property
     def _auth_headers(self) -> Dict[str, str]:
@@ -45,6 +52,7 @@ class SAPSOCClient:
         last_error: Exception | None = None
         for attempt in range(1, self.max_retries + 1):
             try:
+                self._throttle_before_request()
                 response = self.session.request(
                     method=method,
                     url=url,
@@ -53,12 +61,24 @@ class SAPSOCClient:
                     json=json_body,
                     timeout=self.timeout_seconds,
                 )
+                self._last_request_monotonic = time.monotonic()
 
                 if response.status_code in (401, 422):
                     detail = response.text
                     raise RuntimeError(f"Request failed {response.status_code}: {detail}")
 
-                if response.status_code == 503 and attempt < self.max_retries:
+                if response.status_code in (429, 503):
+                    detail = response.text
+                    last_error = RuntimeError(f"Request failed {response.status_code}: {detail}")
+                    if attempt < self.max_retries:
+                        time.sleep(self._retry_delay_seconds(response, attempt))
+                        continue
+
+                    response.raise_for_status()
+                    raise last_error
+
+                if response.status_code >= 500 and attempt < self.max_retries:
+                    last_error = RuntimeError(f"Request failed {response.status_code}: {response.text}")
                     time.sleep(self.retry_backoff_seconds * attempt)
                     continue
 
@@ -67,12 +87,49 @@ class SAPSOCClient:
                     return {}
                 return response.json()
             except Exception as exc:
+                if self._last_request_monotonic is None:
+                    self._last_request_monotonic = time.monotonic()
                 last_error = exc
                 if attempt == self.max_retries:
                     break
                 time.sleep(self.retry_backoff_seconds * attempt)
 
         raise RuntimeError(f"Request failed after retries: {last_error}")
+
+    def _throttle_before_request(self) -> None:
+        if self.min_request_interval_seconds <= 0 or self._last_request_monotonic is None:
+            return
+
+        elapsed_seconds = time.monotonic() - self._last_request_monotonic
+        remaining_seconds = self.min_request_interval_seconds - elapsed_seconds
+        if remaining_seconds > 0:
+            time.sleep(remaining_seconds)
+
+    def _retry_delay_seconds(self, response: requests.Response, attempt: int) -> float:
+        backoff_seconds = self.retry_backoff_seconds * attempt
+        retry_after_seconds = self._retry_after_seconds(response)
+        if retry_after_seconds is None:
+            return backoff_seconds
+        return max(backoff_seconds, min(retry_after_seconds, self.max_retry_after_seconds))
+
+    @staticmethod
+    def _retry_after_seconds(response: requests.Response) -> float | None:
+        raw_retry_after = response.headers.get("Retry-After")
+        if not raw_retry_after:
+            return None
+
+        cleaned = raw_retry_after.strip()
+        if cleaned.isdigit():
+            return float(cleaned)
+
+        try:
+            retry_at = parsedate_to_datetime(cleaned)
+        except (TypeError, ValueError):
+            return None
+
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
 
     def _get(
         self,

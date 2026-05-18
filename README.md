@@ -48,6 +48,16 @@ Copy-Item .env.example .env
 
 Edita `.env` con tus credenciales de SAP SOC y el backend deseado (`sqlite` o `hana`).
 
+Para evitar bloqueos `429 Too Many Requests` del proveedor SAP SOC, deja una pausa mínima entre llamadas y respeta ventanas de reintento:
+
+```text
+POLL_INTERVAL_MINUTES=30
+SAP_SOC_MIN_REQUEST_INTERVAL_SECONDS=1.0
+SAP_SOC_MAX_RETRY_AFTER_SECONDS=300
+MAX_RETRIES=3
+RETRY_BACKOFF_SECONDS=2
+```
+
 ## Ejecutar
 
 Una ingesta manual:
