@@ -19,6 +19,7 @@ from backend.services.detection import (
     evaluate_window_risk,
     format_alert_events,
     score_historical_pattern,
+    score_novelty_pattern,
     score_window_metrics,
     should_submit_alert_notification,
     unavailable_model_signal,
@@ -159,7 +160,7 @@ def _require_admin_token(
         raise HTTPException(status_code=403, detail="Invalid admin token")
 
 
-def _history_min_required() -> int:
+def _history_recommended_rows() -> int:
     return max(20, settings.model_min_training_rows)
 
 
@@ -197,23 +198,52 @@ def _build_history_status(
         limit=settings.model_history_limit
     )
     latest_metrics = latest_window_metrics if latest_window_metrics is not None else store.get_latest_window_metrics()
-    historical_min_required = _history_min_required()
-    model_min_required = max(1, settings.model_min_training_rows)
+    historical_recommended_rows = _history_recommended_rows()
+    model_recommended_rows = max(1, settings.model_min_training_rows)
     history_count = len(baseline_history_rows)
     model_history_count = len(feature_rows)
+    historical_calibrated = history_count >= historical_recommended_rows
+    model_calibrated = model_history_count >= model_recommended_rows
     latest_metrics = latest_metrics or {}
 
     return {
-        "historical_ready": history_count >= historical_min_required,
+        "detection_active": True,
+        "detection_status": "active",
+        "training_required_for_detection": False,
+        "calibration_note": (
+            "La deteccion por reglas actuales esta activa desde la primera ventana. "
+            "El historial y el modelo solo mejoran la calibracion de baseline/anomalias."
+        ),
+        "historical_calibrated": historical_calibrated,
         "historical_rows": history_count,
-        "historical_min_required": historical_min_required,
-        "historical_rows_remaining": max(0, historical_min_required - history_count),
+        "historical_recommended_rows": historical_recommended_rows,
+        "historical_rows_to_calibration": max(0, historical_recommended_rows - history_count),
         "historical_source_table": "window_metrics",
-        "model_ready": model_history_count >= model_min_required,
+        "model_calibrated": model_calibrated,
         "model_rows": model_history_count,
-        "model_min_required": model_min_required,
-        "model_rows_remaining": max(0, model_min_required - model_history_count),
+        "model_recommended_rows": model_recommended_rows,
+        "model_rows_to_calibration": max(0, model_recommended_rows - model_history_count),
         "model_source_table": "window_features",
+        "baseline_signal_status": "calibrated" if historical_calibrated else "warming_up",
+        "model_signal_status": "calibrated" if model_calibrated else "warming_up",
+        "current_rules_ready": True,
+        "current_rules_note": (
+            "Historial/modelo en warming_up solo limita baseline/anomaly ML; "
+            "las reglas actuales de correlacion siguen evaluando cada ventana ingerida."
+        ),
+        "detection_mode": (
+            "rules_baseline_model"
+            if historical_calibrated and model_calibrated
+            else "current_rules_with_limited_history"
+        ),
+        # Backward-compatible aliases. These are signal calibration flags, not
+        # activation gates for detection.
+        "historical_ready": historical_calibrated,
+        "historical_min_required": historical_recommended_rows,
+        "historical_rows_remaining": max(0, historical_recommended_rows - history_count),
+        "model_ready": model_calibrated,
+        "model_min_required": model_recommended_rows,
+        "model_rows_remaining": max(0, model_recommended_rows - model_history_count),
         "history_limit": settings.model_history_limit,
         "latest_window_key": latest_metrics.get("window_key"),
         "latest_historical_source": latest_metrics.get("historical_source"),
@@ -285,6 +315,10 @@ def execute_ingestion_cycle() -> Dict[str, Any]:
             history_rows=history_rows,
             min_history_rows=max(20, settings.model_min_training_rows),
         )
+        novelty_signal = score_novelty_pattern(
+            current_metrics=window_metrics,
+            history_rows=history_rows,
+        )
 
         model_signal = (
             score_window_metrics(
@@ -301,6 +335,7 @@ def execute_ingestion_cycle() -> Dict[str, Any]:
             metrics=window_metrics,
             model_signal=model_signal,
             historical_signal=historical_signal,
+            novelty_signal=novelty_signal,
             count_threshold=settings.error_security_threshold,
             attack_score_threshold=settings.attack_score_threshold,
         )
@@ -475,11 +510,13 @@ def _build_chatbot_context(question: str) -> Dict[str, Any]:
     high_alerts = sum(1 for alert in recent_alerts if str(alert.get("severity", "")).lower() in {"high", "critical"})
     anomaly_windows = sum(1 for window in recent_windows if bool(window.get("is_anomaly")))
     latest_status = latest_run.get("status", "no-runs") if latest_run else "no-runs"
+    history_status_snapshot = _context_call("GET /history/status", _build_history_status)
+    status_latest_snapshot = _context_call("GET /status/latest", status_latest)
 
     endpoint_snapshots = {
         "GET /health": _context_call("GET /health", _build_health_status),
-        "GET /history/status": _context_call("GET /history/status", _build_history_status),
-        "GET /status/latest": _context_call("GET /status/latest", status_latest),
+        "GET /history/status": history_status_snapshot,
+        "GET /status/latest": status_latest_snapshot,
         "GET /dashboard/summary?time_window_hours=24": _context_call(
             "GET /dashboard/summary?time_window_hours=24",
             lambda: dashboard_summary(time_window_hours=24),
@@ -501,6 +538,19 @@ def _build_chatbot_context(question: str) -> Dict[str, Any]:
 
     return {
         "question": question,
+        "context_generated_at_utc": _utc_now_iso(),
+        "interpretation_contract": {
+            "exact_history_gaps_require": "GET /history/status ok=true with *_rows_to_calibration fields",
+            "insufficient_history_meaning": (
+                "baseline/model anomaly calibration may be limited; current correlation rules still evaluate ingested windows"
+            ),
+            "forbidden_conclusions_without_current_evidence": [
+                "risk is unknown only because history is insufficient",
+                "no technical action is required",
+                "the system is waiting for training activation",
+                "the system is healthy without checking latest ingestion status",
+            ],
+        },
         "summary": {
             "recent_alerts": len(recent_alerts),
             "high_alerts": high_alerts,
@@ -587,6 +637,10 @@ def run_reprocess_windows(limit: int = 50, persist: bool = True) -> Dict[str, An
                 history_rows=history_rows,
                 min_history_rows=max(20, settings.model_min_training_rows),
             )
+            novelty_signal = score_novelty_pattern(
+                current_metrics=window_metrics,
+                history_rows=history_rows,
+            )
             model_available = bool(window_metrics.get("model_available", False))
             model_signal = {
                 "model_available": model_available,
@@ -617,6 +671,7 @@ def run_reprocess_windows(limit: int = 50, persist: bool = True) -> Dict[str, An
                 metrics=window_metrics,
                 model_signal=model_signal,
                 historical_signal=historical_signal,
+                novelty_signal=novelty_signal,
                 count_threshold=settings.error_security_threshold,
                 attack_score_threshold=settings.attack_score_threshold,
             )
@@ -693,12 +748,17 @@ def run_rebuild_windows_from_raw(
                 history_rows=history_rows,
                 min_history_rows=max(20, settings.model_min_training_rows),
             )
+            novelty_signal = score_novelty_pattern(
+                current_metrics=window_metrics,
+                history_rows=history_rows,
+            )
             model_signal = unavailable_model_signal("raw_rebuild_model_skipped")
             raw_alerts, risk_summary = evaluate_window_risk(
                 normalized_records=window_records,
                 metrics=window_metrics,
                 model_signal=model_signal,
                 historical_signal=historical_signal,
+                novelty_signal=novelty_signal,
                 count_threshold=settings.error_security_threshold,
                 attack_score_threshold=settings.attack_score_threshold,
             )

@@ -206,6 +206,12 @@ python -m unittest tests.test_features tests.test_detection tests.test_store_fal
 **Si falta historial, no detecta ataques?**
 No. Las reglas actuales siguen generando alertas fuertes. Lo que falta es comparación histórica fina.
 
+**El modelo necesita activarse con entrenamiento?**
+No para detectar. La ingesta y las reglas están activas desde el primer ciclo; el historial y el modelo solo calibran mejor la señal de anomalías.
+
+**Si aparece algo por primera vez es anomalía?**
+Sí, se marca como `novel_activity`: algo nuevo observado. Eso no implica ataque por sí solo, pero sí queda señalado para revisión.
+
 **Por qué `historical_rows` y `model_rows` pueden diferir?**
 `historical_rows` viene de `WINDOW_METRICS`; `model_rows` viene de `WINDOW_FEATURES`, que filtra ventanas no aptas para entrenamiento.
 

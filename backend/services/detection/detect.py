@@ -10,11 +10,13 @@ def evaluate_window_risk(
     metrics: Dict[str, Any],
     model_signal: Dict[str, Any],
     historical_signal: Dict[str, Any],
+    novelty_signal: Dict[str, Any] | None = None,
     count_threshold: int = 25,
     attack_score_threshold: int = 70,
 ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
 
     alerts: List[Dict[str, Any]] = []
+    novelty_signal = novelty_signal or {}
     total_records = int(metrics.get("total_records", len(normalized_records)) or 0)
 
     if total_records <= 0:
@@ -29,6 +31,12 @@ def evaluate_window_risk(
             "pattern_score": 0.0,
             "max_feature_deviation": 0.0,
             "pattern_signals": [],
+            "novelty_available": bool(novelty_signal.get("novelty_available", False)),
+            "novelty_source": novelty_signal.get("novelty_source", "unavailable"),
+            "novelty_score": 0.0,
+            "novelty_status": "no_data",
+            "novelty_reason": "empty_window",
+            "novelty_signals": [],
             "model_available": bool(model_signal.get("model_available", False)),
             "anomaly_score": 0.0,
             "anomaly_percentile": 0.0,
@@ -83,6 +91,12 @@ def evaluate_window_risk(
             "pattern_score": float(historical_signal.get("pattern_score", 0.0) or 0.0),
             "max_feature_deviation": max_feature_deviation,
             "pattern_signals": historical_signal.get("pattern_signals", []),
+            "novelty_available": bool(novelty_signal.get("novelty_available", False)),
+            "novelty_source": novelty_signal.get("novelty_source", "unavailable"),
+            "novelty_score": float(novelty_signal.get("novelty_score", 0.0) or 0.0),
+            "novelty_status": novelty_signal.get("novelty_status", "unknown"),
+            "novelty_reason": novelty_signal.get("novelty_reason", "unknown"),
+            "novelty_signals": novelty_signal.get("novelty_signals", []),
             "model_available": bool(model_signal.get("model_available", False)),
             "model_source": model_signal.get("source", "unavailable"),
             "records_evaluated": len(normalized_records),
@@ -128,8 +142,24 @@ def evaluate_window_risk(
                 )
             )
 
+    for signal in novelty_signal.get("novelty_signals", []):
+        alerts.append(
+            _alert(
+                "novel_observed_values",
+                str(signal.get("severity", "low")),
+                int(signal.get("points", 0) or 0),
+                {
+                    "reason": novelty_signal.get("novelty_reason", "first_observed_values"),
+                    "field": signal.get("field"),
+                    "values": signal.get("values", []),
+                    "value_count": signal.get("value_count", 0),
+                },
+            )
+        )
+
     alerts.extend(_security_combination_alerts(metrics, count_threshold, pattern_reason))
     has_security_combination = _has_security_combination_alert(alerts)
+    has_novelty_signal = bool(novelty_signal.get("novelty_signals", []))
 
     model_available = bool(model_signal.get("model_available"))
     is_model_anomaly = bool(model_signal.get("is_anomaly", False))
@@ -174,10 +204,14 @@ def evaluate_window_risk(
     summary_risk_level = pattern_status
     if has_security_combination and pattern_reason in {"unknown", "insufficient_history", "general_pattern_break"}:
         summary_reason = "security_correlation"
+    elif has_novelty_signal and pattern_reason in {"unknown", "insufficient_history", "general_pattern_break"}:
+        summary_reason = "first_observed_values"
     if pattern_reason in {"llm_activity_drop", "llm_quality_degradation", "system_activity_drop"}:
         summary_risk_level = "service_activity_anomaly"
     if has_security_combination and pattern_status in {"unknown", "normal"}:
         summary_risk_level = "security_correlation"
+    elif has_novelty_signal and pattern_status in {"unknown", "normal"}:
+        summary_risk_level = "novel_activity"
 
     anomaly_fields = _derive_window_anomaly_fields(
         model_signal=model_signal,
@@ -200,6 +234,12 @@ def evaluate_window_risk(
         "pattern_score": float(historical_signal.get("pattern_score", 0.0) or 0.0),
         "max_feature_deviation": float(historical_signal.get("max_feature_deviation", 0.0) or 0.0),
         "pattern_signals": historical_signal.get("pattern_signals", []),
+        "novelty_available": bool(novelty_signal.get("novelty_available", False)),
+        "novelty_source": novelty_signal.get("novelty_source", "unavailable"),
+        "novelty_score": float(novelty_signal.get("novelty_score", 0.0) or 0.0),
+        "novelty_status": novelty_signal.get("novelty_status", "unknown"),
+        "novelty_reason": novelty_signal.get("novelty_reason", "unknown"),
+        "novelty_signals": novelty_signal.get("novelty_signals", []),
         "model_available": model_available,
         "model_source": model_signal.get("source", "unavailable"),
         "records_evaluated": len(normalized_records),
@@ -287,6 +327,9 @@ def _build_explanation(summary: Dict[str, Any], alerts: List[Dict[str, Any]]) ->
     if anomaly_reason == "baseline_shift_candidate":
         windows = int(float(summary.get("baseline_shift_windows", 0) or 0))
         return f"Repeated LLM activity drops suggest a baseline shift after {windows} window(s)."
+
+    if anomaly_reason == "first_observed_values":
+        return f"New observed values detected with threat score {threat_score} and {len(alerts)} alert(s)."
 
     return f"{anomaly_reason.replace('_', ' ').strip().capitalize()} detected with threat score {threat_score} and {len(alerts)} alert(s)."
 

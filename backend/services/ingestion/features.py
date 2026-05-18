@@ -144,6 +144,7 @@ def build_window_metrics(
 
     client_ips = [str(record.get("client_ip")) for record in system_records if record.get("client_ip")]
     service_ids = [str(record.get("service_id")) for record in system_records if record.get("service_id")]
+    llm_model_ids = [str(record.get("llm_model_id")) for record in llm_records if record.get("llm_model_id")]
     ip_counts = Counter(client_ips)
 
     http_status_codes = [_safe_float(record.get("http_status_code")) for record in system_records]
@@ -154,6 +155,13 @@ def build_window_metrics(
 
     http_4xx_count = sum(1 for code in http_status_codes if code is not None and 400 <= code < 500)
     http_5xx_count = sum(1 for code in http_status_codes if code is not None and 500 <= code < 600)
+    observed_http_status_codes = sorted(
+        {
+            str(int(code))
+            for code in http_status_codes
+            if code is not None and float(code).is_integer()
+        }
+    )
     llm_error_count = log_types.get("LLM_ERROR", 0)
     llm_timeout_count = log_types.get("LLM_TIMEOUT", 0)
     llm_request_count = log_types.get("LLM_REQUEST", 0)
@@ -177,6 +185,11 @@ def build_window_metrics(
         "debug_count": log_types.get("DEBUG", 0),
         "unique_client_ips": len(set(client_ips)),
         "unique_services": len(set(service_ids)),
+        "observed_log_types": sorted(log_type for log_type in log_types if log_type),
+        "observed_client_ips": sorted(set(client_ips)),
+        "observed_service_ids": sorted(set(service_ids)),
+        "observed_http_status_codes": observed_http_status_codes,
+        "observed_llm_model_ids": sorted(set(llm_model_ids)),
         "perf_count": log_types.get("PERF", 0),
         "http_4xx_count": http_4xx_count,
         "http_5xx_count": http_5xx_count,
