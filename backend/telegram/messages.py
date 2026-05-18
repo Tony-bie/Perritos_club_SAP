@@ -1,5 +1,7 @@
 from backend.core.config import load_settings
 
+from html import escape
+
 import logging
 from typing import Any, Dict
 import re
@@ -19,8 +21,6 @@ except ModuleNotFoundError:
     ParseMode = None
     Command = None
     Message = Any
-
-import asyncio
 
 logging.basicConfig(
     level=logging.INFO,
@@ -80,7 +80,6 @@ if router and Command:
             parse_mode="HTML" 
         )
 
-
 if router and Command:
     @router.message(Command("health"))
     async def health_telegram(message: Message):
@@ -88,16 +87,19 @@ if router and Command:
         if bot is None:
             await message.answer("Telegram bot no esta configurado en este entorno.")
             return
-        result = await health()
-        text = str(result)
-        patron = r"'([^']+)':\s*([^,}]+)"
-        matches = re.findall(patron, text)
-        lineas = []
-        for clave, valor in matches:
-            valor_limpio = valor.strip("'\"")
-            lineas.append(f"• *{clave.replace('_', ' ').title()}... * {valor_limpio}")
-        mensaje_final = "*Estado del Sistema*\n\n" + "\n".join(lineas)
-        await bot.send_message(chat_id=message.chat.id, text=mensaje_final)
+        try:
+            result = await health()
+            text = str(result)
+            patron = r"'([^']+)':\s*([^,}]+)"
+            matches = re.findall(patron, text)
+            lineas = []
+            for clave, valor in matches:
+                valor_limpio = valor.strip("'\" ")       # ← faltaba esta línea
+                lineas.append(f"• <b>{clave.replace('_', ' ').title()}... </b> {escape(valor_limpio)}")
+            mensaje_final = "<b>Estado del Sistema</b>\n\n" + "\n".join(lineas)
+            await bot.send_message(chat_id=message.chat.id, text=mensaje_final, parse_mode="HTML")
+        except Exception as exc:
+            await bot.send_message(chat_id=message.chat.id, text=f"❌ Error: {escape(str(exc))}", parse_mode="HTML")
 
 if router and Command:
     @router.message(Command("alerts_recent"))

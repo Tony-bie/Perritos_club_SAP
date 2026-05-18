@@ -21,6 +21,22 @@ class ConfigTests(unittest.TestCase):
 
         self.assertTrue(settings.enable_worker)
 
+    def test_db_host_auto_selects_hana_backend(self) -> None:
+        env = {
+            "DB_HOST": "railway-hana-host.example",
+            "DB_PORT": "443",
+            "DB_USER": "DBADMIN",
+            "DB_PASSWORD": "database-password",
+        }
+
+        with patch.dict(os.environ, env, clear=True):
+            settings = load_settings()
+
+        self.assertEqual(settings.storage_backend, "hana")
+        self.assertEqual(settings.hana_host, "railway-hana-host.example")
+        self.assertEqual(settings.hana_user, "DBADMIN")
+        self.assertEqual(settings.hana_password, "database-password")
+
     def test_db_env_vars_override_hana_cloud_uaa_binding_for_sql_login(self) -> None:
         vcap_services = {
             "hana-cloud": [

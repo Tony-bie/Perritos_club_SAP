@@ -6,4 +6,5 @@ python-dotenv==1.0.1
 httpx==0.28.1
 hdbcli==2.28.20
 hana-ml==2.28.26031701
-aiogram == 3.27.0
+aiogram==3.27.0
+litellm==1.68.2

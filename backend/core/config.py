@@ -97,8 +97,15 @@ class Settings:
     retention_days: int
     cleanup_schedule_enabled: bool
     cleanup_schedule_hour: int
-    token_bot_telegram : str
-    chat_ids : list
+    token_bot_telegram: str
+    chat_ids: list[int]
+    telegram_chatbot_enabled: bool
+    llm_enabled: bool
+    llm_provider_model: str
+    llm_api_key: str
+    llm_base_url: str
+    llm_temperature: float
+    llm_max_tokens: int
 
 
 def _clean_str(value: str | None, default: str = "") -> str:
@@ -136,6 +143,19 @@ def _to_float(value: str | None, default: float) -> float:
         return float(_clean_str(value, str(default)))
     except (TypeError, ValueError):
         return default
+
+
+def _to_int_list(value: str) -> list[int]:
+    result: list[int] = []
+    for piece in value.split(","):
+        cleaned = _clean_str(piece)
+        if not cleaned:
+            continue
+        try:
+            result.append(int(cleaned))
+        except ValueError:
+            continue
+    return result
 
 
 def _get_vcap_hana_credentials() -> dict[str, str]:
@@ -234,7 +254,7 @@ def _resolve_storage_backend() -> str:
     if configured:
         return configured
 
-    has_hana = bool(_get_hana_value("HANA_HOST", "SAP_HANA_HOST", default=""))
+    has_hana = bool(_get_hana_value("HANA_HOST", "SAP_HANA_HOST", "DB_HOST", default=""))
     return "hana" if has_hana else "sqlite"
 
 
@@ -305,6 +325,13 @@ def load_settings() -> Settings:
         retention_days=max(7, _to_int(_getenv("RETENTION_DAYS", default="90"), 90)),
         cleanup_schedule_enabled=_to_bool(_getenv("CLEANUP_SCHEDULE_ENABLED", default="true"), True),
         cleanup_schedule_hour=max(0, min(23, _to_int(_getenv("CLEANUP_SCHEDULE_HOUR", default="2"), 2))),
-        token_bot_telegram=(_getenv("TOKEN_BOT_TELEGRAM")),
-        chat_ids=[int(x) for x in _getenv("CHAT_IDS", default="").split(",") if x],
+        token_bot_telegram=_getenv("TOKEN_BOT_TELEGRAM", default=""),
+        chat_ids=_to_int_list(_getenv("CHAT_IDS", default="")),
+        telegram_chatbot_enabled=_to_bool(_getenv("TELEGRAM_CHATBOT_ENABLED", default="true"), True),
+        llm_enabled=_to_bool(_getenv("LLM_ENABLED", default="true"), True),
+        llm_provider_model=_getenv("LLM_PROVIDER_MODEL", default=""),
+        llm_api_key=_getenv("LLM_API_KEY", default=""),
+        llm_base_url=_getenv("LLM_BASE_URL", default=""),
+        llm_temperature=_to_float(_getenv("LLM_TEMPERATURE", default="0.2"), 0.2),
+        llm_max_tokens=max(100, _to_int(_getenv("LLM_MAX_TOKENS", default="400"), 400)),
     )

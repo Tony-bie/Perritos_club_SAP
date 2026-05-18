@@ -33,7 +33,7 @@ class FakeStore:
         ][:limit]
 
     def get_recent_window_metrics(self, limit: int = 200):
-        return [
+        windows = [
             {
                 "window_key": "20260502T100000Z_20260502T103000Z",
                 "window_start": "2026-05-02T10:00:00Z",
@@ -47,7 +47,24 @@ class FakeStore:
                 "anomaly_percentile": 99.0,
                 "saved_at_utc": "2026-05-02T10:31:00Z",
             }
-        ][:limit]
+        ]
+        windows.extend(
+            {
+                "window_key": f"history-window-{index}",
+                "window_start": f"2026-05-02T09:{index:02d}:00Z",
+                "window_end": f"2026-05-02T09:{index + 1:02d}:00Z",
+                "total_records": 100 + index,
+                "threat_score": 0,
+                "attack_predicted": False,
+                "model_available": False,
+                "is_anomaly": False,
+                "anomaly_score": 0.0,
+                "anomaly_percentile": 0.0,
+                "saved_at_utc": f"2026-05-02T09:{index:02d}:00Z",
+            }
+            for index in range(11)
+        )
+        return windows[:limit]
 
     def get_recent_ingest_runs(self, limit: int = 200):
         return [
@@ -95,7 +112,14 @@ class FakeStore:
         return {"status": "cleaned", "retention_days": retention_days, "rows_deleted": 0, "deleted_counts": {}}
 
     def get_recent_window_features(self, limit: int = 200):
-        return []
+        return [
+            {
+                "window_key": f"history-{index}",
+                "total_records": 100 + index,
+                "saved_at_utc": f"2026-05-02T09:{index:02d}:00Z",
+            }
+            for index in range(12)
+        ][:limit]
 
     def get_dashboard_summary(self, time_window_hours: int = 24):
         return {
@@ -114,6 +138,9 @@ class FakeStore:
             },
             "generated_at": "2026-05-02T10:31:00Z",
         }
+
+    def get_fallback_status(self):
+        return {"enabled": False, "pending_counts": {}}
 
 
 class BlockCApiTests(unittest.TestCase):
@@ -166,6 +193,27 @@ class BlockCApiTests(unittest.TestCase):
                 self.assertEqual(dashboard["alerts_by_severity"]["high"], 1)
                 self.assertEqual(dashboard["top_metrics"]["threat_score"], 80)
                 self.assertEqual(dashboard["last_run"]["status"], "success")
+
+    def test_history_status_endpoint_reports_readiness_gap(self) -> None:
+        fake_store = FakeStore()
+        with patch.object(application, "store", fake_store), patch.object(
+            application, "_storage_status", {"ready": True, "error": None}
+        ):
+            with TestClient(application.app) as client:
+                response = client.get("/history/status")
+                self.assertEqual(response.status_code, 200)
+                payload = response.json()
+                expected_min_required = max(20, application.settings.model_min_training_rows)
+
+                self.assertEqual(payload["status"], "ok")
+                self.assertEqual(payload["historical_rows"], 12)
+                self.assertEqual(payload["historical_min_required"], expected_min_required)
+                self.assertEqual(payload["historical_rows_remaining"], max(0, expected_min_required - 12))
+                self.assertEqual(payload["historical_ready"], 12 >= expected_min_required)
+                self.assertEqual(payload["historical_source_table"], "window_metrics")
+                self.assertEqual(payload["model_rows"], 12)
+                self.assertEqual(payload["model_source_table"], "window_features")
+                self.assertEqual(payload["latest_window_key"], "20260502T100000Z_20260502T103000Z")
 
 
 if __name__ == "__main__":
