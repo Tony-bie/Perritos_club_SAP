@@ -53,7 +53,7 @@ if dp and router:
 
 if router and Command:
     @router.message(Command("last_status"))
-    async def last_status_telegram(message: Message):
+    async def last_status_telegram(message: Message) -> None:
         from backend.api.http import status_latest
         result = status_latest()
         text = str(result)
@@ -82,7 +82,7 @@ if router and Command:
 
 if router and Command:
     @router.message(Command("health"))
-    async def health_telegram(message: Message):
+    async def health_telegram(message: Message) -> None:
         from backend.api.http import health
         if bot is None:
             await message.answer("Telegram bot no esta configurado en este entorno.")
@@ -103,7 +103,7 @@ if router and Command:
 
 if router and Command:
     @router.message(Command("alerts_recent"))
-    async def alert_recent_telegram(message: Message):
+    async def alert_recent_telegram(message: Message) -> None:
         from backend.api.http import alerts_recent
         if bot is None:
             await message.answer("Telegram bot no esta configurado en este entorno.")
@@ -148,7 +148,7 @@ if router and Command:
 
 if router and Command:
     @router.message(Command("metrics_windows"))
-    async def alert_recent_telegram(message: Message):
+    async def alert_recent_telegram(message: Message) -> None:
         from backend.api.http import metrics_windows
         if bot is None:
             await message.answer("Telegram bot no esta configurado en este entorno.")
@@ -190,7 +190,7 @@ if router and Command:
 
 if router and Command:
     @router.message(Command("runs_recent"))
-    async def run_recent_telegram(message: Message):
+    async def run_recent_telegram(message: Message) -> None:
         from backend.api.http import runs_recent
         if bot is None:
             await message.answer("Telegram bot no esta configurado en este entorno.")
@@ -232,7 +232,7 @@ if router and Command:
 
 if router and Command:
     @router.message(Command("dashboard"))
-    async def dashboard_telegram(message: Message):
+    async def dashboard_telegram(message: Message) -> None:
         from backend.api.http import dashboard_summary
 
         if bot is None:
@@ -316,7 +316,7 @@ if router and Command:
 
 if router and Command:
     @router.message(CommandStart())
-    async def start(message: Message):
+    async def start(message: Message) -> None:
         if bot is None:
             await message.answer("Telegram bot no está configurado.")
             return

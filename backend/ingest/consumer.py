@@ -67,7 +67,8 @@ async def consumer_loop_kafka() -> None:
 		await producer.stop()
 
 
-def consumer_loop_local_stub():
+def consumer_loop_local_stub() -> None:
+	"""Local placeholder when Kafka consumer is not used."""
 	logger.info("Local consumer stub - use mock_run for local in-memory testing")
 
 

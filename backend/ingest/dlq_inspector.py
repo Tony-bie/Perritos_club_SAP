@@ -2,7 +2,7 @@ import os
 import asyncio
 import json
 import aiohttp
-from typing import Any
+from typing import Any, Dict
 
 from .dlq import DLQ_FILE, read_mock_dlq
 from ..core.logging_config import configure_logging
@@ -15,7 +15,8 @@ DLQ_TOPIC = os.getenv("DLQ_TOPIC", "sap_logs_dlq")
 FEEDBACK_API = os.getenv("FEEDBACK_API", "http://localhost:8001/feedback")
 
 
-def inspect_mock_dlq(limit: int = 100):
+def inspect_mock_dlq(limit: int = 100) -> None:
+	"""Print recent entries from the file-based DLQ."""
 	items = read_mock_dlq(limit=limit)
 	if not items:
 		logger.info("No mock DLQ file found or it's empty.")
@@ -25,6 +26,7 @@ def inspect_mock_dlq(limit: int = 100):
 
 
 async def consume_kafka_dlq() -> None:
+	"""Consume and print DLQ events from Kafka when aiokafka is available."""
 	try:
 		from aiokafka import AIOKafkaConsumer
 	except Exception:
@@ -44,6 +46,7 @@ async def consume_kafka_dlq() -> None:
 
 
 async def post_feedback_example(alert_id: str, label: str = "FP") -> None:
+	"""Send a sample feedback payload to the feedback API."""
 	payload = {"alert_id": alert_id, "label": label, "comment": "Auto-posted from DLQ inspector"}
 	async with aiohttp.ClientSession() as s:
 		async with s.post(FEEDBACK_API, json=payload) as resp:
@@ -51,6 +54,7 @@ async def post_feedback_example(alert_id: str, label: str = "FP") -> None:
 
 
 def main() -> None:
+	"""CLI entrypoint to inspect DLQ in mock-file or Kafka mode."""
 	mode = os.getenv("DLQ_MODE", "mock")
 	if mode == "mock":
 		inspect_mock_dlq()

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from ..core.config import FEEDBACK_DB
 
@@ -14,12 +14,14 @@ DB_PATH = FEEDBACK_DB
 
 
 def _resolve_path(path: str | None) -> str:
+    """Return explicit DB path or fallback feedback DB path from config."""
     if path:
         return path
     return DB_PATH
 
 
 def init_db(path: str | None = None) -> None:
+    """Create feedback table if it does not exist."""
     db_path = _resolve_path(path)
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
@@ -38,7 +40,13 @@ def init_db(path: str | None = None) -> None:
     conn.close()
 
 
-def insert_feedback(alert_id: str, label: str, comment: str = None, path: str | None = None) -> None:
+def insert_feedback(
+    alert_id: str,
+    label: str,
+    comment: str | None = None,
+    path: str | None = None,
+) -> None:
+    """Insert a feedback row for a specific alert."""
     db_path = _resolve_path(path)
     init_db(db_path)
     conn = sqlite3.connect(db_path)
@@ -48,7 +56,8 @@ def insert_feedback(alert_id: str, label: str, comment: str = None, path: str | 
     conn.close()
 
 
-def list_feedback(limit: int = 100, path: str | None = None) -> List[Dict]:
+def list_feedback(limit: int = 100, path: str | None = None) -> List[Dict[str, Any]]:
+    """Return latest feedback entries up to the requested limit."""
     db_path = _resolve_path(path)
     if not Path(db_path).exists():
         return []

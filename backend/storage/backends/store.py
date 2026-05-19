@@ -629,7 +629,8 @@ class HanaStore(BaseStore):
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
-    def _connect(self):
+    def _connect(self) -> Any:
+        """Create and return an HANA DBAPI connection."""
         try:
             from hdbcli import dbapi
         except ImportError as exc:
