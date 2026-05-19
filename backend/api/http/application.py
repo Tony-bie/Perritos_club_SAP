@@ -5,7 +5,7 @@ import re
 import threading
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict
 from uuid import uuid4
 
@@ -67,6 +67,24 @@ logger = logging.getLogger("sap_soc_backend")
 
 settings = load_settings()
 store = create_store(settings)
+_storage_status: Dict[str, Any] = {
+    "ready": False,
+    "error": None,
+}
+try:
+    # Ensure DB schema exists at import time so tests that import the module
+    # see storage readiness immediately.
+    try:
+        store.ensure_schema()
+        _storage_status["ready"] = True
+    except Exception as exc:
+        _storage_status["ready"] = False
+        _storage_status["error"] = str(exc)
+        logger.exception("Storage initialization failed: %s", exc)
+except Exception:
+    # Defensive: if create_store itself fails, report degraded storage
+    _storage_status["ready"] = False
+    _storage_status["error"] = "create_store_failed"
 client = SAPSOCClient(
     base_url=settings.sap_soc_base_url,
     token=settings.sap_soc_token,
@@ -89,10 +107,70 @@ else:
 app = FastAPI(title="SAP SOC Backend", version="0.1.0")
 _stop_event = threading.Event()
 _worker_thread: threading.Thread | None = None
-_storage_status: Dict[str, Any] = {
-    "ready": False,
-    "error": None,
+
+# Retrain status tracking
+_retrain_status: Dict[str, Any] = {
+    "enabled": bool(settings.retrain_enabled),
+    "interval_minutes": int(settings.retrain_interval_minutes),
+    "model_path": settings.retrain_model_path,
+    "last_trigger": None,
+    "last_attempt_utc": None,
+    "last_success_utc": None,
+    "last_duration_ms": None,
+    "last_rows": None,
+    "last_trained": None,
+    "last_model_path": None,
+    "last_error": None,
+    "last_result": None,
+    "total_attempts": 0,
+    "total_success": 0,
+    "total_skipped": 0,
+    "total_failures": 0,
 }
+
+
+def _run_retrain_job() -> Dict[str, Any]:
+    """Run a retraining job and update `_retrain_status` accordingly.
+
+    Returns the `retrain_model` result payload.
+    """
+    start = datetime.now(timezone.utc)
+    _retrain_status["last_trigger"] = "manual_api"
+    _retrain_status["last_attempt_utc"] = start.isoformat()
+    _retrain_status["total_attempts"] = int(_retrain_status.get("total_attempts", 0)) + 1
+
+    try:
+        result = retrain_model(output_path=settings.retrain_model_path, db_path=settings.feedback_db)
+        end = datetime.now(timezone.utc)
+        duration_ms = (end - start).total_seconds() * 1000.0
+
+        _retrain_status.update(
+            {
+                "last_success_utc": end.isoformat(),
+                "last_duration_ms": float(duration_ms),
+                "last_rows": int(result.get("rows") or 0),
+                "last_trained": bool(result.get("trained") or False),
+                "last_model_path": result.get("model_path") or settings.retrain_model_path,
+                "last_error": None,
+                "last_result": result,
+            }
+        )
+        _retrain_status["total_success"] = int(_retrain_status.get("total_success", 0)) + 1
+        return result
+    except Exception as exc:
+        end = datetime.now(timezone.utc)
+        duration_ms = (end - start).total_seconds() * 1000.0
+        _retrain_status.update(
+            {
+                "last_duration_ms": float(duration_ms),
+                "last_trained": False,
+                "last_error": str(exc),
+                "last_result": None,
+            }
+        )
+        _retrain_status["total_failures"] = int(_retrain_status.get("total_failures", 0)) + 1
+        logger.exception("Retrain job failed: %s", exc)
+        raise
 
 class CleanupRequest(BaseModel):
     retention_days: int = 90
@@ -843,6 +921,44 @@ def run_resync_fallback(_: None = Depends(_require_admin_token)) -> Dict[str, An
     except Exception as exc:
         logger.exception("Fallback resync failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/run/retrain")
+def run_retrain(_: None = Depends(_require_admin_token)) -> Dict[str, Any]:
+    if not _storage_status["ready"]:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Storage backend unavailable: {_storage_status['error'] or 'unknown error'}",
+        )
+
+    try:
+        result = _run_retrain_job()
+        return {"status": "ok", "result": result}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Manual retrain failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/status/retrain")
+def status_retrain() -> Dict[str, Any]:
+    # provide a snapshot of retrain status with a computed next_run_in_seconds
+    status = dict(_retrain_status)
+    interval = int(status.get("interval_minutes") or settings.retrain_interval_minutes or 60)
+    next_run_seconds = interval * 60
+    last_attempt = status.get("last_attempt_utc")
+    try:
+        if last_attempt:
+            last_dt = datetime.fromisoformat(str(last_attempt))
+            next_dt = last_dt + timedelta(minutes=interval)
+            now = datetime.now(timezone.utc)
+            next_run_seconds = max(0, int((next_dt - now).total_seconds()))
+    except Exception:
+        next_run_seconds = interval * 60
+
+    status["next_run_in_seconds"] = int(next_run_seconds)
+    return {"retrain": status}
 
 if router and Command:
     @router.message(Command("last_status"))
