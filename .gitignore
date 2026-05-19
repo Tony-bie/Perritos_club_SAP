@@ -206,6 +206,8 @@ cython_debug/
 
 # Local ingestion output
 data/
+artifacts/models/
+*.joblib
 
 # Node leftovers
 node_modules/

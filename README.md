@@ -85,7 +85,9 @@ python tools/walkthrough_demo.py
 | `/run/reprocess-windows` | POST | Recalcula riesgo de ventanas existentes |
 | `/run/rebuild-windows-from-raw` | POST | Reconstruye ventanas desde `RAW_LOGS` |
 | `/run/resync-fallback` | POST | Sincroniza el fallback SQLite hacia HANA |
+| `/run/retrain` | POST | Fuerza retraining inmediato (admin) |
 | `/api/admin/cleanup` | POST | Limpieza por retención |
+| `/status/retrain` | GET | Estado detallado del retraining programado |
 
 Las rutas administrativas usan `Authorization: Bearer <token>` o `X-API-Key: <token>`.
 
@@ -178,6 +180,22 @@ HANA_SCHEMA=SOC_PIPELINE
 ```
 
 Con `STORAGE_BACKEND=hana`, el sistema usa SQLite como fallback/respaldo resiliente si HANA falla. Cuando HANA vuelve, `ResilientStore` intenta subir lo pendiente al primario.
+
+## Retraining Programado
+
+El retraining ya no depende de ejecución manual. El worker en segundo plano ejecuta el ciclo de ingesta y, en intervalos configurables, lanza un job real de retraining que guarda el modelo en una ruta persistente.
+
+```text
+RETRAIN_ENABLED=true
+RETRAIN_INTERVAL_MINUTES=60
+RETRAIN_MODEL_PATH=./artifacts/models/retrain_model.joblib
+```
+
+Notas:
+
+- Si no hay suficientes etiquetas para entrenar, el job se salta sin romper el worker.
+- El estado del último retrain se expone en `GET /health` dentro de `retrain` y en `GET /status/retrain`.
+- Métricas incluidas: duración en ms, filas usadas, último error, último trigger y contadores de intentos/exitos/skips/fallos.
 
 ## Pruebas
 

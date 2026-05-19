@@ -94,10 +94,14 @@ class SqliteStore(BaseStore):
     def __init__(self, sqlite_path: str) -> None:
         self.sqlite_path = sqlite_path
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.sqlite_path)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            yield conn
+        finally:
+            conn.close()
 
     def ensure_schema(self) -> None:
         with self._connect() as conn:

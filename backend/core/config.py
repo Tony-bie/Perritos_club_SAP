@@ -1,3 +1,25 @@
+"""Centralized configuration helpers for the project."""
+import os
+from typing import Optional
+
+
+def get_env(name: str, default: Optional[str] = None) -> Optional[str]:
+    return os.getenv(name, default)
+
+
+# Kafka
+KAFKA_BOOTSTRAP: str = get_env("KAFKA_BOOTSTRAP", "localhost:9092")
+INGEST_TOPIC: str = get_env("INGEST_TOPIC", "sap_logs")
+DLQ_TOPIC: str = get_env("DLQ_TOPIC", "sap_logs_dlq")
+
+# Feedback API
+FEEDBACK_API: str = get_env("FEEDBACK_API", "http://localhost:8001/feedback")
+
+# Mock DLQ file
+MOCK_DLQ_FILE: str = get_env("MOCK_DLQ_FILE", os.path.join(os.getcwd(), "backend/ingest/mock_dlq.jsonl"))
+
+# Logging
+LOG_LEVEL: str = get_env("LOG_LEVEL", "INFO")
 import json
 import os
 from dataclasses import dataclass
@@ -92,6 +114,9 @@ class Settings:
     model_contamination: float
     model_kmeans_clusters: int
     model_history_limit: int
+    retrain_enabled: bool
+    retrain_interval_minutes: int
+    retrain_model_path: str
     # Bloque B: Optimización y retención
     batch_size: int
     retention_days: int
@@ -320,6 +345,12 @@ def load_settings() -> Settings:
         model_contamination=_to_float(_getenv("MODEL_CONTAMINATION", default="0.15"), 0.15),
         model_kmeans_clusters=max(2, _to_int(_getenv("MODEL_KMEANS_CLUSTERS", default="4"), 4)),
         model_history_limit=_to_int(_getenv("MODEL_HISTORY_LIMIT", default="200"), 200),
+        retrain_enabled=_to_bool(_getenv("RETRAIN_ENABLED", default="true"), True),
+        retrain_interval_minutes=max(1, _to_int(_getenv("RETRAIN_INTERVAL_MINUTES", default="60"), 60)),
+        retrain_model_path=_getenv(
+            "RETRAIN_MODEL_PATH",
+            default=os.path.join(os.getcwd(), "artifacts", "models", "retrain_model.joblib"),
+        ),
         # Bloque B: Optimización y retención
         batch_size=max(1, _to_int(_getenv("BATCH_SIZE", default="1000"), 1000)),
         retention_days=max(7, _to_int(_getenv("RETENTION_DAYS", default="90"), 90)),

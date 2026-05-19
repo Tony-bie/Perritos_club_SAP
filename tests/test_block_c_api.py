@@ -215,6 +215,66 @@ class BlockCApiTests(unittest.TestCase):
                 self.assertEqual(payload["model_source_table"], "window_features")
                 self.assertEqual(payload["latest_window_key"], "20260502T100000Z_20260502T103000Z")
 
+    def test_run_retrain_requires_admin_token(self) -> None:
+        fake_store = FakeStore()
+        with patch.object(application, "store", fake_store), patch.object(
+            application, "_storage_status", {"ready": True, "error": None}
+        ), patch.object(application.settings, "admin_api_key", "secret-admin-token"):
+            with TestClient(application.app) as client:
+                response = client.post("/run/retrain")
+                self.assertEqual(response.status_code, 403)
+
+    def test_run_retrain_and_status_retrain_report_detailed_metrics(self) -> None:
+        fake_store = FakeStore()
+        fake_result = {
+            "trained": True,
+            "rows": 42,
+            "model_path": "artifacts/models/retrain_model.joblib",
+        }
+
+        with patch.object(application, "store", fake_store), patch.object(
+            application, "_storage_status", {"ready": True, "error": None}
+        ), patch.object(application.settings, "admin_api_key", "secret-admin-token"), patch.object(
+            application, "_run_retrain_job", return_value=fake_result
+        ):
+            application._retrain_status.update(
+                {
+                    "enabled": True,
+                    "interval_minutes": 60,
+                    "model_path": "artifacts/models/retrain_model.joblib",
+                    "last_trigger": "manual_api",
+                    "last_attempt_utc": "2026-05-17T17:00:00+00:00",
+                    "last_success_utc": "2026-05-17T17:00:01+00:00",
+                    "last_duration_ms": 250.5,
+                    "last_rows": 42,
+                    "last_trained": True,
+                    "last_model_path": "artifacts/models/retrain_model.joblib",
+                    "last_error": None,
+                    "last_result": fake_result,
+                    "total_attempts": 3,
+                    "total_success": 2,
+                    "total_skipped": 1,
+                    "total_failures": 0,
+                }
+            )
+
+            with TestClient(application.app) as client:
+                run_response = client.post("/run/retrain", headers={"X-API-Key": "secret-admin-token"})
+                self.assertEqual(run_response.status_code, 200)
+                run_payload = run_response.json()
+                self.assertEqual(run_payload["status"], "ok")
+                self.assertEqual(run_payload["result"]["rows"], 42)
+
+                status_response = client.get("/status/retrain")
+                self.assertEqual(status_response.status_code, 200)
+                status_payload = status_response.json()
+                retrain = status_payload["retrain"]
+                self.assertIn("last_duration_ms", retrain)
+                self.assertIn("last_rows", retrain)
+                self.assertIn("last_error", retrain)
+                self.assertIn("total_attempts", retrain)
+                self.assertIn("next_run_in_seconds", retrain)
+
 
 if __name__ == "__main__":
     unittest.main()

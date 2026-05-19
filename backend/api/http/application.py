@@ -4,6 +4,8 @@ import logging
 import re
 import threading
 import time
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Any, Dict
 from uuid import uuid4
 
@@ -11,6 +13,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel
 
 from backend.core.config import load_settings
+from backend.ml.retrain import retrain_model
 from backend.services.chatbot import generate_chatbot_response
 from backend.services.clients import SAPSOCClient
 from backend.services.detection import (
@@ -54,34 +57,239 @@ logging.basicConfig(
 )
 logger = logging.getLogger("sap_soc_backend")
 
-settings = load_settings()
-store = create_store(settings)
-client = SAPSOCClient(
-    base_url=settings.sap_soc_base_url,
-    token=settings.sap_soc_token,
-    timeout_seconds=settings.request_timeout_seconds,
-    max_retries=settings.max_retries,
-    retry_backoff_seconds=settings.retry_backoff_seconds,
-)
+# Globals initialized during application lifespan to avoid heavy work at import
+class _LazySettings:
+    """Proxy that loads real Settings on first attribute access.
 
-token = settings.token_bot_telegram
-chat_ids = settings.chat_ids
-bot: Bot | None = None
-if Bot and DefaultBotProperties and ParseMode and token:
-    try:
-        bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
-    except Exception as exc:
-        logger.warning("Telegram bot disabled due to invalid token: %s", exc)
-else:
-    logger.info("Telegram bot disabled: TOKEN_BOT_TELEGRAM is not configured")
+    This lets tests and modules access `application.settings.<attr>` without
+    forcing configuration to be loaded at import time. The real Settings
+    instance will be created on-demand via `load_settings()` and replaced
+    during application startup by the lifespan initializer.
+    """
 
-app = FastAPI(title="SAP SOC Backend", version="0.1.0")
+    def __init__(self):
+        object.__setattr__(self, "_real", None)
+
+    def _ensure(self):
+        if object.__getattribute__(self, "_real") is None:
+            object.__setattr__(self, "_real", load_settings())
+
+    def __getattr__(self, name: str):
+        self._ensure()
+        return getattr(object.__getattribute__(self, "_real"), name)
+
+    def __setattr__(self, name: str, value):
+        if name == "_real":
+            object.__setattr__(self, name, value)
+            return
+        self._ensure()
+        setattr(object.__getattribute__(self, "_real"), name, value)
+
+
+settings = _LazySettings()
+store = None
+client = None
+bot = None
+token = None
+chat_ids = []
+
 _stop_event = threading.Event()
 _worker_thread: threading.Thread | None = None
 _storage_status: Dict[str, Any] = {
     "ready": False,
     "error": None,
 }
+_last_retrain_monotonic: float | None = None
+_retrain_status: Dict[str, Any] = {
+    "enabled": False,
+    "interval_minutes": 0,
+    "model_path": "",
+    "last_trigger": None,
+    "last_attempt_utc": None,
+    "last_success_utc": None,
+    "last_duration_ms": None,
+    "last_rows": 0,
+    "last_trained": None,
+    "last_model_path": None,
+    "last_error": None,
+    "last_result": None,
+    "total_attempts": 0,
+    "total_success": 0,
+    "total_skipped": 0,
+    "total_failures": 0,
+}
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _run_retrain_job(trigger: str = "scheduled", raise_on_error: bool = False) -> Dict[str, Any]:
+    global _last_retrain_monotonic
+
+    started = time.perf_counter()
+    _last_retrain_monotonic = time.monotonic()
+    _retrain_status["total_attempts"] = int(_retrain_status.get("total_attempts", 0)) + 1
+    _retrain_status["last_trigger"] = trigger
+    _retrain_status["last_attempt_utc"] = _utc_now_iso()
+    _retrain_status["enabled"] = bool(settings.retrain_enabled)
+    _retrain_status["interval_minutes"] = int(settings.retrain_interval_minutes)
+    _retrain_status["model_path"] = settings.retrain_model_path
+
+    try:
+        result = retrain_model(output_path=settings.retrain_model_path)
+    except Exception as exc:
+        duration_ms = round((time.perf_counter() - started) * 1000.0, 2)
+        _retrain_status["last_duration_ms"] = duration_ms
+        _retrain_status["last_trained"] = False
+        _retrain_status["last_rows"] = 0
+        _retrain_status["last_error"] = str(exc)
+        _retrain_status["last_result"] = {"trained": False, "rows": 0, "error": str(exc), "trigger": trigger}
+        _retrain_status["total_failures"] = int(_retrain_status.get("total_failures", 0)) + 1
+        logger.exception("Retrain failed (trigger=%s): %s", trigger, exc)
+        if raise_on_error:
+            raise
+        return dict(_retrain_status["last_result"])
+
+    duration_ms = round((time.perf_counter() - started) * 1000.0, 2)
+    _retrain_status["last_duration_ms"] = duration_ms
+    _retrain_status["last_rows"] = int(result.get("rows") or 0)
+    _retrain_status["last_trained"] = bool(result.get("trained"))
+    _retrain_status["last_model_path"] = result.get("model_path") or settings.retrain_model_path
+    _retrain_status["last_result"] = result
+    if result.get("trained"):
+        _retrain_status["last_success_utc"] = _utc_now_iso()
+        _retrain_status["last_error"] = None
+        _retrain_status["total_success"] = int(_retrain_status.get("total_success", 0)) + 1
+        logger.info(
+            "Retrain completed. trigger=%s rows=%s model_path=%s duration_ms=%s",
+            trigger,
+            result.get("rows"),
+            result.get("model_path"),
+            duration_ms,
+        )
+    else:
+        _retrain_status["last_error"] = "not_enough_data"
+        _retrain_status["total_skipped"] = int(_retrain_status.get("total_skipped", 0)) + 1
+        logger.info("Retrain skipped: not enough labeled data. trigger=%s duration_ms=%s", trigger, duration_ms)
+    return result
+
+
+def _build_retrain_status() -> Dict[str, Any]:
+    status = dict(_retrain_status)
+    status["enabled"] = bool(settings.retrain_enabled)
+    status["interval_minutes"] = int(settings.retrain_interval_minutes)
+    status["model_path"] = settings.retrain_model_path
+
+    if settings.retrain_enabled:
+        interval_seconds = max(60, int(settings.retrain_interval_minutes) * 60)
+        if _last_retrain_monotonic is None:
+            status["next_run_in_seconds"] = 0
+        else:
+            elapsed = time.monotonic() - _last_retrain_monotonic
+            status["next_run_in_seconds"] = int(max(0, interval_seconds - elapsed))
+    else:
+        status["next_run_in_seconds"] = None
+
+    return status
+
+
+def _maybe_run_retrain_job() -> None:
+    if not settings.retrain_enabled:
+        return
+
+    global _last_retrain_monotonic
+    interval_seconds = max(60, int(settings.retrain_interval_minutes) * 60)
+    now_monotonic = time.monotonic()
+    if _last_retrain_monotonic is not None and (now_monotonic - _last_retrain_monotonic) < interval_seconds:
+        return
+
+    try:
+        _run_retrain_job(trigger="scheduled")
+    except Exception as exc:
+        _retrain_status["last_error"] = str(exc)
+        logger.exception("Scheduled retrain failed: %s", exc)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    # Load settings and initialize clients/stores at startup (deferred from import)
+    global settings, store, client, bot, token, chat_ids
+
+    # Allow tests to patch `application.settings` before startup. If a lazy
+    # proxy exists and already loaded a real instance, re-use it; otherwise
+    # load settings now.
+    from types import SimpleNamespace
+
+    real_settings = None
+    if isinstance(settings, _LazySettings):
+        real_settings = getattr(settings, "_real", None)
+    elif settings is not None and not isinstance(settings, _LazySettings):
+        real_settings = settings
+
+    if real_settings is None:
+        real_settings = load_settings()
+
+    # Replace the proxy/global with the concrete Settings instance so other
+    # code uses the same object during runtime.
+    settings = real_settings
+
+    # Respect a test-patched `store` if present; otherwise create one now.
+    if store is None:
+        store = create_store(settings)
+
+    # Create HTTP client only if not patched in tests
+    if client is None:
+        client = SAPSOCClient(
+            base_url=settings.sap_soc_base_url,
+            token=settings.sap_soc_token,
+            timeout_seconds=settings.request_timeout_seconds,
+            max_retries=settings.max_retries,
+            retry_backoff_seconds=settings.retry_backoff_seconds,
+        )
+
+    token = getattr(settings, "token_bot_telegram", None)
+    chat_ids = getattr(settings, "chat_ids", [])
+    if bot is None:
+        bot = None
+        if Bot and DefaultBotProperties and ParseMode and token:
+            try:
+                bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
+            except Exception as exc:
+                logger.warning("Telegram bot disabled due to invalid token: %s", exc)
+        else:
+            logger.info("Telegram bot disabled: TOKEN_BOT_TELEGRAM is not configured")
+
+    try:
+        store.ensure_schema()
+    except Exception as exc:
+        _storage_status["ready"] = False
+        _storage_status["error"] = str(exc)
+        logger.exception("Storage backend unavailable during startup: %s", exc)
+        yield
+        return
+
+    _storage_status["ready"] = True
+    _storage_status["error"] = None
+    _retrain_status["enabled"] = bool(settings.retrain_enabled)
+    _retrain_status["interval_minutes"] = int(settings.retrain_interval_minutes)
+    _retrain_status["model_path"] = settings.retrain_model_path
+
+    global _worker_thread
+    _stop_event.clear()
+    if settings.enable_worker:
+        _worker_thread = threading.Thread(target=_worker_loop, daemon=True)
+        _worker_thread.start()
+
+    try:
+        yield
+    finally:
+        _stop_event.set()
+        if _worker_thread and _worker_thread.is_alive():
+            _worker_thread.join(timeout=5)
+
+
+app = FastAPI(title="SAP SOC Backend", version="0.1.0", lifespan=lifespan)
 
 router = Router(name=__name__) if Router else None
 dp = Dispatcher() if Dispatcher else None
@@ -229,6 +437,7 @@ def _build_health_status() -> Dict[str, Any]:
         "storage_ready": _storage_status["ready"],
         "storage_error": _storage_status["error"],
         "model_enabled": settings.model_enabled,
+        "retrain": _build_retrain_status(),
     }
     fallback_status = store.get_fallback_status()
     if fallback_status.get("enabled"):
@@ -390,38 +599,12 @@ def _worker_loop() -> None:
                 result.get("upserted_records"),
                 result.get("alerts_count"),
             )
+            _maybe_run_retrain_job()
         except Exception as exc:
             logger.exception("Worker cycle failed: %s", exc)
 
         wait_seconds = max(1, settings.poll_interval_minutes * 60)
         _stop_event.wait(wait_seconds)
-
-
-@app.on_event("startup")
-def on_startup() -> None:
-    try:
-        store.ensure_schema()
-    except Exception as exc:
-        _storage_status["ready"] = False
-        _storage_status["error"] = str(exc)
-        logger.exception("Storage backend unavailable during startup: %s", exc)
-        return
-
-    _storage_status["ready"] = True
-    _storage_status["error"] = None
-
-    global _worker_thread
-    if settings.enable_worker:
-        _worker_thread = threading.Thread(target=_worker_loop, daemon=True)
-        _worker_thread.start()
-
-
-@app.on_event("shutdown")
-def on_shutdown() -> None:
-    _stop_event.set()
-    if _worker_thread and _worker_thread.is_alive():
-        _worker_thread.join(timeout=5)
-
 
 @app.get("/health")
 async def health() -> Dict[str, Any]:
@@ -807,6 +990,28 @@ def run_resync_fallback(_: None = Depends(_require_admin_token)) -> Dict[str, An
     except Exception as exc:
         logger.exception("Fallback resync failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/run/retrain")
+def run_retrain(_: None = Depends(_require_admin_token)) -> Dict[str, Any]:
+    try:
+        result = _run_retrain_job(trigger="manual_api", raise_on_error=True)
+        return {
+            "status": "ok",
+            "message": "Retrain executed",
+            "result": result,
+            "retrain": _build_retrain_status(),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/status/retrain")
+def retrain_status() -> Dict[str, Any]:
+    return {
+        "status": "ok",
+        "retrain": _build_retrain_status(),
+    }
 
 if router and Command:
     @router.message(Command("last_status"))
