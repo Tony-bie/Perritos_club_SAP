@@ -4,6 +4,7 @@ import logging
 import re
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict
 from uuid import uuid4
 
@@ -158,6 +159,10 @@ def _require_admin_token(
 
     if provided_token != expected_token:
         raise HTTPException(status_code=403, detail="Invalid admin token")
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _history_recommended_rows() -> int:
