@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel
+from fastapi import Response
 
 from backend.core.config import load_settings
 from backend.ml.retrain import retrain_model
@@ -87,6 +88,24 @@ class _LazySettings:
 
 
 settings = _LazySettings()
+
+# Prometheus metrics: lazy-import so tests without prometheus_client don't fail
+try:
+    from prometheus_client import CollectorRegistry, generate_latest, CONTENT_TYPE_LATEST, Counter, Gauge
+
+    PROM_REGISTRY = CollectorRegistry()
+    RETRAIN_COUNTER = Counter("sap_retrain_runs_total", "Total retrain runs", registry=PROM_REGISTRY)
+    RETRAIN_DURATION_MS = Gauge("sap_retrain_last_duration_ms", "Last retrain duration (ms)", registry=PROM_REGISTRY)
+    RETRAIN_ROWS = Gauge("sap_retrain_last_rows", "Last retrain rows", registry=PROM_REGISTRY)
+    DLQ_APPENDS = Counter("sap_dlq_appends_total", "Total DLQ appends", registry=PROM_REGISTRY)
+    METRICS_AVAILABLE = True
+except Exception:
+    PROM_REGISTRY = None
+    RETRAIN_COUNTER = None
+    RETRAIN_DURATION_MS = None
+    RETRAIN_ROWS = None
+    DLQ_APPENDS = None
+    METRICS_AVAILABLE = False
 store = None
 client = None
 bot = None
@@ -157,6 +176,16 @@ def _run_retrain_job(trigger: str = "scheduled", raise_on_error: bool = False) -
     _retrain_status["last_trained"] = bool(result.get("trained"))
     _retrain_status["last_model_path"] = result.get("model_path") or settings.retrain_model_path
     _retrain_status["last_result"] = result
+    # Update prometheus metrics when available
+    try:
+        if RETRAIN_COUNTER is not None:
+            RETRAIN_COUNTER.inc()
+        if RETRAIN_DURATION_MS is not None:
+            RETRAIN_DURATION_MS.set(duration_ms)
+        if RETRAIN_ROWS is not None:
+            RETRAIN_ROWS.set(int(result.get("rows") or 0))
+    except Exception:
+        logger.debug("Failed to update retrain metrics", exc_info=True)
     if result.get("trained"):
         _retrain_status["last_success_utc"] = _utc_now_iso()
         _retrain_status["last_error"] = None
@@ -1012,6 +1041,20 @@ def retrain_status() -> Dict[str, Any]:
         "status": "ok",
         "retrain": _build_retrain_status(),
     }
+
+
+@app.get("/metrics")
+def metrics() -> Response:
+    """Prometheus metrics endpoint. Falls back to 204 if metrics not available."""
+    try:
+        if not METRICS_AVAILABLE or PROM_REGISTRY is None:
+            return Response(status_code=204)
+        from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+
+        payload = generate_latest(PROM_REGISTRY)
+        return Response(content=payload, media_type=CONTENT_TYPE_LATEST)
+    except Exception:
+        return Response(status_code=500)
 
 if router and Command:
     @router.message(Command("last_status"))
