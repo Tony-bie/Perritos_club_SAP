@@ -135,8 +135,11 @@ def retrain_model(output_path: str | None = None, db_path: str | None = None) ->
 
 
 def main() -> None:
-	db_path = os.getenv("FEEDBACK_DB")
-	output_path = os.getenv("MODEL_OUTPUT") or os.getenv("RETRAIN_MODEL_PATH")
+	from ..core.config import FEEDBACK_DB
+	from ..core.config import load_settings
+
+	db_path = FEEDBACK_DB
+	output_path = os.getenv("MODEL_OUTPUT") or load_settings().retrain_model_path
 	result = retrain_model(output_path=output_path, db_path=db_path)
 	print(json.dumps(result, indent=2))
 

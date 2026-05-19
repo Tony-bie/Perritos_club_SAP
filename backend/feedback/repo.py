@@ -4,12 +4,13 @@ Provides simple functions to initialize DB and insert/list feedback rows.
 """
 from __future__ import annotations
 
-import os
 import sqlite3
 from pathlib import Path
 from typing import Dict, List
 
-DB_PATH = os.getenv("FEEDBACK_DB", os.path.join(os.getcwd(), "backend/feedback/labels.db"))
+from ..core.config import FEEDBACK_DB
+
+DB_PATH = FEEDBACK_DB
 
 
 def _resolve_path(path: str | None) -> str:
@@ -18,7 +19,7 @@ def _resolve_path(path: str | None) -> str:
     return DB_PATH
 
 
-def init_db(path: str | None = DB_PATH) -> None:
+def init_db(path: str | None = None) -> None:
     db_path = _resolve_path(path)
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
@@ -37,7 +38,7 @@ def init_db(path: str | None = DB_PATH) -> None:
     conn.close()
 
 
-def insert_feedback(alert_id: str, label: str, comment: str = None, path: str | None = DB_PATH) -> None:
+def insert_feedback(alert_id: str, label: str, comment: str = None, path: str | None = None) -> None:
     db_path = _resolve_path(path)
     init_db(db_path)
     conn = sqlite3.connect(db_path)
@@ -47,7 +48,7 @@ def insert_feedback(alert_id: str, label: str, comment: str = None, path: str | 
     conn.close()
 
 
-def list_feedback(limit: int = 100, path: str | None = DB_PATH) -> List[Dict]:
+def list_feedback(limit: int = 100, path: str | None = None) -> List[Dict]:
     db_path = _resolve_path(path)
     if not Path(db_path).exists():
         return []

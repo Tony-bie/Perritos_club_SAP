@@ -18,6 +18,9 @@ FEEDBACK_API: str = get_env("FEEDBACK_API", "http://localhost:8001/feedback")
 # Mock DLQ file
 MOCK_DLQ_FILE: str = get_env("MOCK_DLQ_FILE", os.path.join(os.getcwd(), "backend/ingest/mock_dlq.jsonl"))
 
+# Feedback DB path
+FEEDBACK_DB: str = get_env("FEEDBACK_DB", os.path.join(os.getcwd(), "backend", "feedback", "labels.db"))
+
 # Logging
 LOG_LEVEL: str = get_env("LOG_LEVEL", "INFO")
 import json
@@ -98,6 +101,7 @@ class Settings:
     retry_backoff_seconds: int
     storage_backend: str
     sqlite_path: str
+    feedback_db: str
     hana_host: str
     hana_port: int
     hana_user: str
@@ -316,6 +320,7 @@ def load_settings() -> Settings:
         retry_backoff_seconds=_to_int(os.getenv("RETRY_BACKOFF_SECONDS"), 2),
         storage_backend=_resolve_storage_backend(),
         sqlite_path=_getenv("SQLITE_PATH", default="./pipeline.db"),
+        feedback_db=_getenv("FEEDBACK_DB", default=FEEDBACK_DB),
         hana_host=_get_hana_value("HANA_HOST", "SAP_HANA_HOST", "DB_HOST", default=""),
         hana_port=_to_int(_get_hana_value("HANA_PORT", "SAP_HANA_PORT", "DB_PORT", default="443"), 443),
         hana_user=db_user or _get_hana_value("HANA_USER", "SAP_HANA_USER", default=""),
