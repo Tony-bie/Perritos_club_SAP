@@ -6,3 +6,4 @@ python-dotenv==1.0.1
 httpx==0.24.1
 prometheus_client==0.17.0
 tenacity==8.5.0
+aiohttp==3.11.18
