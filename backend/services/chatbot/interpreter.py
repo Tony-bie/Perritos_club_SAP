@@ -43,6 +43,8 @@ def _build_messages(question: str, context: Dict[str, Any]) -> list[Dict[str, st
         "Usa solo el contexto entregado, especialmente endpoint_snapshots. "
         "Cuando sea util, menciona el endpoint que respalda tu conclusion. "
         "Si faltan datos, dilo claramente. "
+        "No describas historial/modelo en warming_up como una activacion pendiente: "
+        "la deteccion por reglas actuales esta activa desde la primera ventana. "
         "Responde en maximo 8 lineas, con foco operativo y acciones concretas."
     )
 

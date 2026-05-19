@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from backend.services.detection.detect import apply_baseline_shift_context, evaluate_window_risk
+from backend.services.detection.novelty import score_novelty_pattern
 
 
 class DetectionTests(unittest.TestCase):
@@ -255,6 +256,52 @@ class DetectionTests(unittest.TestCase):
         self.assertFalse(summary["attack_predicted"])
         self.assertEqual(summary["risk_level"], "unknown")
         self.assertEqual(summary["anomaly_reason"], "insufficient_history")
+
+    def test_first_observed_values_are_novel_activity_not_attack(self) -> None:
+        metrics = {
+            "window_key": "first-seen-window",
+            "total_records": 3,
+            "observed_log_types": ["SECURITY"],
+            "observed_service_ids": ["new-service"],
+            "observed_http_status_codes": ["403"],
+        }
+        novelty_signal = score_novelty_pattern(
+            current_metrics=metrics,
+            history_rows=[
+                {
+                    "observed_log_types": ["ERROR"],
+                    "observed_service_ids": ["known-service"],
+                    "observed_http_status_codes": ["200"],
+                }
+            ],
+        )
+
+        alerts, summary = evaluate_window_risk(
+            normalized_records=[{"_id": "1"}],
+            metrics=metrics,
+            model_signal={
+                "model_available": False,
+                "source": "insufficient_history:1",
+            },
+            historical_signal={
+                "historical_available": False,
+                "historical_source": "insufficient_history:1",
+                "pattern_status": "unknown",
+                "pattern_reason": "insufficient_history",
+                "pattern_score": 0.0,
+                "max_feature_deviation": 0.0,
+                "pattern_signals": [],
+            },
+            novelty_signal=novelty_signal,
+        )
+
+        self.assertEqual(summary["risk_level"], "novel_activity")
+        self.assertEqual(summary["anomaly_reason"], "first_observed_values")
+        self.assertTrue(summary["is_anomaly"])
+        self.assertFalse(summary["attack_predicted"])
+        self.assertEqual(summary["novelty_status"], "novel_activity")
+        self.assertGreaterEqual(summary["novelty_score"], 20.0)
+        self.assertTrue(any(alert["alert_type"] == "NOVEL_OBSERVED_VALUES" for alert in alerts))
 
     def test_elevated_security_rate_emits_correlation_alerts(self) -> None:
         alerts, summary = evaluate_window_risk(

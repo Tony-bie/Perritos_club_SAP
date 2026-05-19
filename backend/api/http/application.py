@@ -23,6 +23,7 @@ from backend.services.detection import (
     evaluate_window_risk,
     format_alert_events,
     score_historical_pattern,
+    score_novelty_pattern,
     score_window_metrics,
     should_submit_alert_notification,
     unavailable_model_signal,
@@ -34,6 +35,7 @@ from backend.services.ingestion import (
     run_ingestion_cycle,
 )
 from backend.storage import create_store
+from backend.escalation.playbook import execute_playbook_for_alert
 
 try:
     from aiogram import Bot, Dispatcher, Router
@@ -52,278 +54,45 @@ except ModuleNotFoundError:
 
 import asyncio
 
+router = Router(name=__name__) if Router else None
+dp = Dispatcher() if Dispatcher else None
+if dp and router:
+    dp.include_router(router)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 logger = logging.getLogger("sap_soc_backend")
 
-# Globals initialized during application lifespan to avoid heavy work at import
-class _LazySettings:
-    """Proxy that loads real Settings on first attribute access.
+settings = load_settings()
+store = create_store(settings)
+client = SAPSOCClient(
+    base_url=settings.sap_soc_base_url,
+    token=settings.sap_soc_token,
+    timeout_seconds=settings.request_timeout_seconds,
+    max_retries=settings.max_retries,
+    retry_backoff_seconds=settings.retry_backoff_seconds,
+)
 
-    This lets tests and modules access `application.settings.<attr>` without
-    forcing configuration to be loaded at import time. The real Settings
-    instance will be created on-demand via `load_settings()` and replaced
-    during application startup by the lifespan initializer.
-    """
+token = settings.token_bot_telegram
+chat_ids = settings.chat_ids
+bot: Bot | None = None
+if Bot and DefaultBotProperties and ParseMode and token:
+    try:
+        bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
+    except Exception as exc:
+        logger.warning("Telegram bot disabled due to invalid token: %s", exc)
+else:
+    logger.info("Telegram bot disabled: TOKEN_BOT_TELEGRAM is not configured")
 
-    def __init__(self):
-        object.__setattr__(self, "_real", None)
-
-    def _ensure(self):
-        if object.__getattribute__(self, "_real") is None:
-            object.__setattr__(self, "_real", load_settings())
-
-    def __getattr__(self, name: str):
-        self._ensure()
-        return getattr(object.__getattribute__(self, "_real"), name)
-
-    def __setattr__(self, name: str, value):
-        if name == "_real":
-            object.__setattr__(self, name, value)
-            return
-        self._ensure()
-        setattr(object.__getattribute__(self, "_real"), name, value)
-
-
-settings = _LazySettings()
-
-# Prometheus metrics: lazy-import so tests without prometheus_client don't fail
-try:
-    from prometheus_client import CollectorRegistry, generate_latest, CONTENT_TYPE_LATEST, Counter, Gauge
-
-    PROM_REGISTRY = CollectorRegistry()
-    RETRAIN_COUNTER = Counter("sap_retrain_runs_total", "Total retrain runs", registry=PROM_REGISTRY)
-    RETRAIN_DURATION_MS = Gauge("sap_retrain_last_duration_ms", "Last retrain duration (ms)", registry=PROM_REGISTRY)
-    RETRAIN_ROWS = Gauge("sap_retrain_last_rows", "Last retrain rows", registry=PROM_REGISTRY)
-    DLQ_APPENDS = Counter("sap_dlq_appends_total", "Total DLQ appends", registry=PROM_REGISTRY)
-    METRICS_AVAILABLE = True
-except Exception:
-    PROM_REGISTRY = None
-    RETRAIN_COUNTER = None
-    RETRAIN_DURATION_MS = None
-    RETRAIN_ROWS = None
-    DLQ_APPENDS = None
-    METRICS_AVAILABLE = False
-store = None
-client = None
-bot = None
-token = None
-chat_ids = []
-
+app = FastAPI(title="SAP SOC Backend", version="0.1.0")
 _stop_event = threading.Event()
 _worker_thread: threading.Thread | None = None
 _storage_status: Dict[str, Any] = {
     "ready": False,
     "error": None,
 }
-_last_retrain_monotonic: float | None = None
-_retrain_status: Dict[str, Any] = {
-    "enabled": False,
-    "interval_minutes": 0,
-    "model_path": "",
-    "last_trigger": None,
-    "last_attempt_utc": None,
-    "last_success_utc": None,
-    "last_duration_ms": None,
-    "last_rows": 0,
-    "last_trained": None,
-    "last_model_path": None,
-    "last_error": None,
-    "last_result": None,
-    "total_attempts": 0,
-    "total_success": 0,
-    "total_skipped": 0,
-    "total_failures": 0,
-}
-
-
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _run_retrain_job(trigger: str = "scheduled", raise_on_error: bool = False) -> Dict[str, Any]:
-    global _last_retrain_monotonic
-
-    started = time.perf_counter()
-    _last_retrain_monotonic = time.monotonic()
-    _retrain_status["total_attempts"] = int(_retrain_status.get("total_attempts", 0)) + 1
-    _retrain_status["last_trigger"] = trigger
-    _retrain_status["last_attempt_utc"] = _utc_now_iso()
-    _retrain_status["enabled"] = bool(settings.retrain_enabled)
-    _retrain_status["interval_minutes"] = int(settings.retrain_interval_minutes)
-    _retrain_status["model_path"] = settings.retrain_model_path
-
-    try:
-        result = retrain_model(output_path=settings.retrain_model_path)
-    except Exception as exc:
-        duration_ms = round((time.perf_counter() - started) * 1000.0, 2)
-        _retrain_status["last_duration_ms"] = duration_ms
-        _retrain_status["last_trained"] = False
-        _retrain_status["last_rows"] = 0
-        _retrain_status["last_error"] = str(exc)
-        _retrain_status["last_result"] = {"trained": False, "rows": 0, "error": str(exc), "trigger": trigger}
-        _retrain_status["total_failures"] = int(_retrain_status.get("total_failures", 0)) + 1
-        logger.exception("Retrain failed (trigger=%s): %s", trigger, exc)
-        if raise_on_error:
-            raise
-        return dict(_retrain_status["last_result"])
-
-    duration_ms = round((time.perf_counter() - started) * 1000.0, 2)
-    _retrain_status["last_duration_ms"] = duration_ms
-    _retrain_status["last_rows"] = int(result.get("rows") or 0)
-    _retrain_status["last_trained"] = bool(result.get("trained"))
-    _retrain_status["last_model_path"] = result.get("model_path") or settings.retrain_model_path
-    _retrain_status["last_result"] = result
-    # Update prometheus metrics when available
-    try:
-        if RETRAIN_COUNTER is not None:
-            RETRAIN_COUNTER.inc()
-        if RETRAIN_DURATION_MS is not None:
-            RETRAIN_DURATION_MS.set(duration_ms)
-        if RETRAIN_ROWS is not None:
-            RETRAIN_ROWS.set(int(result.get("rows") or 0))
-    except Exception:
-        logger.debug("Failed to update retrain metrics", exc_info=True)
-    if result.get("trained"):
-        _retrain_status["last_success_utc"] = _utc_now_iso()
-        _retrain_status["last_error"] = None
-        _retrain_status["total_success"] = int(_retrain_status.get("total_success", 0)) + 1
-        logger.info(
-            "Retrain completed. trigger=%s rows=%s model_path=%s duration_ms=%s",
-            trigger,
-            result.get("rows"),
-            result.get("model_path"),
-            duration_ms,
-        )
-    else:
-        _retrain_status["last_error"] = "not_enough_data"
-        _retrain_status["total_skipped"] = int(_retrain_status.get("total_skipped", 0)) + 1
-        logger.info("Retrain skipped: not enough labeled data. trigger=%s duration_ms=%s", trigger, duration_ms)
-    return result
-
-
-def _build_retrain_status() -> Dict[str, Any]:
-    status = dict(_retrain_status)
-    status["enabled"] = bool(settings.retrain_enabled)
-    status["interval_minutes"] = int(settings.retrain_interval_minutes)
-    status["model_path"] = settings.retrain_model_path
-
-    if settings.retrain_enabled:
-        interval_seconds = max(60, int(settings.retrain_interval_minutes) * 60)
-        if _last_retrain_monotonic is None:
-            status["next_run_in_seconds"] = 0
-        else:
-            elapsed = time.monotonic() - _last_retrain_monotonic
-            status["next_run_in_seconds"] = int(max(0, interval_seconds - elapsed))
-    else:
-        status["next_run_in_seconds"] = None
-
-    return status
-
-
-def _maybe_run_retrain_job() -> None:
-    if not settings.retrain_enabled:
-        return
-
-    global _last_retrain_monotonic
-    interval_seconds = max(60, int(settings.retrain_interval_minutes) * 60)
-    now_monotonic = time.monotonic()
-    if _last_retrain_monotonic is not None and (now_monotonic - _last_retrain_monotonic) < interval_seconds:
-        return
-
-    try:
-        _run_retrain_job(trigger="scheduled")
-    except Exception as exc:
-        _retrain_status["last_error"] = str(exc)
-        logger.exception("Scheduled retrain failed: %s", exc)
-
-
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    # Load settings and initialize clients/stores at startup (deferred from import)
-    global settings, store, client, bot, token, chat_ids
-
-    # Allow tests to patch `application.settings` before startup. If a lazy
-    # proxy exists and already loaded a real instance, re-use it; otherwise
-    # load settings now.
-    from types import SimpleNamespace
-
-    real_settings = None
-    if isinstance(settings, _LazySettings):
-        real_settings = getattr(settings, "_real", None)
-    elif settings is not None and not isinstance(settings, _LazySettings):
-        real_settings = settings
-
-    if real_settings is None:
-        real_settings = load_settings()
-
-    # Replace the proxy/global with the concrete Settings instance so other
-    # code uses the same object during runtime.
-    settings = real_settings
-
-    # Respect a test-patched `store` if present; otherwise create one now.
-    if store is None:
-        store = create_store(settings)
-
-    # Create HTTP client only if not patched in tests
-    if client is None:
-        client = SAPSOCClient(
-            base_url=settings.sap_soc_base_url,
-            token=settings.sap_soc_token,
-            timeout_seconds=settings.request_timeout_seconds,
-            max_retries=settings.max_retries,
-            retry_backoff_seconds=settings.retry_backoff_seconds,
-        )
-
-    token = getattr(settings, "token_bot_telegram", None)
-    chat_ids = getattr(settings, "chat_ids", [])
-    if bot is None:
-        bot = None
-        if Bot and DefaultBotProperties and ParseMode and token:
-            try:
-                bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
-            except Exception as exc:
-                logger.warning("Telegram bot disabled due to invalid token: %s", exc)
-        else:
-            logger.info("Telegram bot disabled: TOKEN_BOT_TELEGRAM is not configured")
-
-    try:
-        store.ensure_schema()
-    except Exception as exc:
-        _storage_status["ready"] = False
-        _storage_status["error"] = str(exc)
-        logger.exception("Storage backend unavailable during startup: %s", exc)
-        yield
-        return
-
-    _storage_status["ready"] = True
-    _storage_status["error"] = None
-    _retrain_status["enabled"] = bool(settings.retrain_enabled)
-    _retrain_status["interval_minutes"] = int(settings.retrain_interval_minutes)
-    _retrain_status["model_path"] = settings.retrain_model_path
-
-    global _worker_thread
-    _stop_event.clear()
-    if settings.enable_worker:
-        _worker_thread = threading.Thread(target=_worker_loop, daemon=True)
-        _worker_thread.start()
-
-    try:
-        yield
-    finally:
-        _stop_event.set()
-        if _worker_thread and _worker_thread.is_alive():
-            _worker_thread.join(timeout=5)
-
-
-app = FastAPI(title="SAP SOC Backend", version="0.1.0", lifespan=lifespan)
-
-router = Router(name=__name__) if Router else None
-dp = Dispatcher() if Dispatcher else None
-if dp and router:
-    dp.include_router(router)
 
 class CleanupRequest(BaseModel):
     retention_days: int = 90
@@ -393,7 +162,11 @@ def _require_admin_token(
         raise HTTPException(status_code=403, detail="Invalid admin token")
 
 
-def _history_min_required() -> int:
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _history_recommended_rows() -> int:
     return max(20, settings.model_min_training_rows)
 
 
@@ -431,23 +204,52 @@ def _build_history_status(
         limit=settings.model_history_limit
     )
     latest_metrics = latest_window_metrics if latest_window_metrics is not None else store.get_latest_window_metrics()
-    historical_min_required = _history_min_required()
-    model_min_required = max(1, settings.model_min_training_rows)
+    historical_recommended_rows = _history_recommended_rows()
+    model_recommended_rows = max(1, settings.model_min_training_rows)
     history_count = len(baseline_history_rows)
     model_history_count = len(feature_rows)
+    historical_calibrated = history_count >= historical_recommended_rows
+    model_calibrated = model_history_count >= model_recommended_rows
     latest_metrics = latest_metrics or {}
 
     return {
-        "historical_ready": history_count >= historical_min_required,
+        "detection_active": True,
+        "detection_status": "active",
+        "training_required_for_detection": False,
+        "calibration_note": (
+            "La deteccion por reglas actuales esta activa desde la primera ventana. "
+            "El historial y el modelo solo mejoran la calibracion de baseline/anomalias."
+        ),
+        "historical_calibrated": historical_calibrated,
         "historical_rows": history_count,
-        "historical_min_required": historical_min_required,
-        "historical_rows_remaining": max(0, historical_min_required - history_count),
+        "historical_recommended_rows": historical_recommended_rows,
+        "historical_rows_to_calibration": max(0, historical_recommended_rows - history_count),
         "historical_source_table": "window_metrics",
-        "model_ready": model_history_count >= model_min_required,
+        "model_calibrated": model_calibrated,
         "model_rows": model_history_count,
-        "model_min_required": model_min_required,
-        "model_rows_remaining": max(0, model_min_required - model_history_count),
+        "model_recommended_rows": model_recommended_rows,
+        "model_rows_to_calibration": max(0, model_recommended_rows - model_history_count),
         "model_source_table": "window_features",
+        "baseline_signal_status": "calibrated" if historical_calibrated else "warming_up",
+        "model_signal_status": "calibrated" if model_calibrated else "warming_up",
+        "current_rules_ready": True,
+        "current_rules_note": (
+            "Historial/modelo en warming_up solo limita baseline/anomaly ML; "
+            "las reglas actuales de correlacion siguen evaluando cada ventana ingerida."
+        ),
+        "detection_mode": (
+            "rules_baseline_model"
+            if historical_calibrated and model_calibrated
+            else "current_rules_with_limited_history"
+        ),
+        # Backward-compatible aliases. These are signal calibration flags, not
+        # activation gates for detection.
+        "historical_ready": historical_calibrated,
+        "historical_min_required": historical_recommended_rows,
+        "historical_rows_remaining": max(0, historical_recommended_rows - history_count),
+        "model_ready": model_calibrated,
+        "model_min_required": model_recommended_rows,
+        "model_rows_remaining": max(0, model_recommended_rows - model_history_count),
         "history_limit": settings.model_history_limit,
         "latest_window_key": latest_metrics.get("window_key"),
         "latest_historical_source": latest_metrics.get("historical_source"),
@@ -463,10 +265,11 @@ def _build_health_status() -> Dict[str, Any]:
         "worker_enabled": settings.enable_worker,
         "worker_running": bool(_worker_thread and _worker_thread.is_alive()),
         "storage_backend": settings.storage_backend,
+        "hana_configured": bool(settings.hana_host and settings.hana_user),
+        "hana_schema": settings.hana_schema,
         "storage_ready": _storage_status["ready"],
         "storage_error": _storage_status["error"],
         "model_enabled": settings.model_enabled,
-        "retrain": _build_retrain_status(),
     }
     fallback_status = store.get_fallback_status()
     if fallback_status.get("enabled"):
@@ -515,6 +318,10 @@ def execute_ingestion_cycle() -> Dict[str, Any]:
             history_rows=history_rows,
             min_history_rows=max(20, settings.model_min_training_rows),
         )
+        novelty_signal = score_novelty_pattern(
+            current_metrics=window_metrics,
+            history_rows=history_rows,
+        )
 
         model_signal = (
             score_window_metrics(
@@ -531,6 +338,7 @@ def execute_ingestion_cycle() -> Dict[str, Any]:
             metrics=window_metrics,
             model_signal=model_signal,
             historical_signal=historical_signal,
+            novelty_signal=novelty_signal,
             count_threshold=settings.error_security_threshold,
             attack_score_threshold=settings.attack_score_threshold,
         )
@@ -546,6 +354,16 @@ def execute_ingestion_cycle() -> Dict[str, Any]:
         alert_events = format_alert_events(raw_alerts, run_id=run_id)
         window_alerts_inserted = store.insert_alerts(alert_events)
         alerts_inserted += window_alerts_inserted
+
+        # Execute escalation playbook for each alert event to decide actions
+        try:
+            for alert_evt in alert_events:
+                try:
+                    execute_playbook_for_alert(alert=alert_evt, window_metrics=window_metrics, settings=settings, client=client, store=store)
+                except Exception:
+                    logger.exception("Failed to execute playbook for alert %s", alert_evt.get("alert_id"))
+        except Exception:
+            logger.exception("Playbook loop failed")
 
         submitted_alert_response: Dict[str, Any] | None = None
         submitted_alert_error: str | None = None
@@ -668,8 +486,6 @@ def _context_call(name: str, builder: Any) -> Dict[str, Any]:
             "ok": False,
             "error": str(exc),
         }
-
-
 def _build_chatbot_context(question: str) -> Dict[str, Any]:
     recent_alerts = store.get_recent_alerts(limit=20)
     recent_windows = store.get_recent_window_metrics(limit=20)
@@ -681,11 +497,13 @@ def _build_chatbot_context(question: str) -> Dict[str, Any]:
     high_alerts = sum(1 for alert in recent_alerts if str(alert.get("severity", "")).lower() in {"high", "critical"})
     anomaly_windows = sum(1 for window in recent_windows if bool(window.get("is_anomaly")))
     latest_status = latest_run.get("status", "no-runs") if latest_run else "no-runs"
+    history_status_snapshot = _context_call("GET /history/status", _build_history_status)
+    status_latest_snapshot = _context_call("GET /status/latest", status_latest)
 
     endpoint_snapshots = {
         "GET /health": _context_call("GET /health", _build_health_status),
-        "GET /history/status": _context_call("GET /history/status", _build_history_status),
-        "GET /status/latest": _context_call("GET /status/latest", status_latest),
+        "GET /history/status": history_status_snapshot,
+        "GET /status/latest": status_latest_snapshot,
         "GET /dashboard/summary?time_window_hours=24": _context_call(
             "GET /dashboard/summary?time_window_hours=24",
             lambda: dashboard_summary(time_window_hours=24),
@@ -707,6 +525,19 @@ def _build_chatbot_context(question: str) -> Dict[str, Any]:
 
     return {
         "question": question,
+        "context_generated_at_utc": _utc_now_iso(),
+        "interpretation_contract": {
+            "exact_history_gaps_require": "GET /history/status ok=true with *_rows_to_calibration fields",
+            "insufficient_history_meaning": (
+                "baseline/model anomaly calibration may be limited; current correlation rules still evaluate ingested windows"
+            ),
+            "forbidden_conclusions_without_current_evidence": [
+                "risk is unknown only because history is insufficient",
+                "no technical action is required",
+                "the system is waiting for training activation",
+                "the system is healthy without checking latest ingestion status",
+            ],
+        },
         "summary": {
             "recent_alerts": len(recent_alerts),
             "high_alerts": high_alerts,
@@ -746,23 +577,6 @@ async def _handle_telegram_analysis(message: Message, question: str) -> None:
     text = str(response.get("text") or "No hubo respuesta")
     source = str(response.get("source") or "unknown")
     await message.answer(f"{text}\n\nFuente: {source}", parse_mode=None)
-
-
-if router and Command:
-    @router.message(Command("start"))
-    async def start_telegram(message: Message) -> None:
-        await message.answer(
-            "Comandos disponibles:\n"
-            "/health - estado general\n"
-            "/last_status - ultimo run\n"
-            "/ask <pregunta> - interpreta alertas y logs recientes"
-        )
-
-    @router.message(Command("health"))
-    async def health_telegram(message: Message) -> None:
-        result = await health()
-        await message.answer(_format_kv_for_telegram("Estado del sistema", result), parse_mode=None)
-
 
 @app.get("/health/sap")
 def health_sap() -> Dict[str, Any]:
@@ -810,6 +624,10 @@ def run_reprocess_windows(limit: int = 50, persist: bool = True) -> Dict[str, An
                 history_rows=history_rows,
                 min_history_rows=max(20, settings.model_min_training_rows),
             )
+            novelty_signal = score_novelty_pattern(
+                current_metrics=window_metrics,
+                history_rows=history_rows,
+            )
             model_available = bool(window_metrics.get("model_available", False))
             model_signal = {
                 "model_available": model_available,
@@ -840,6 +658,7 @@ def run_reprocess_windows(limit: int = 50, persist: bool = True) -> Dict[str, An
                 metrics=window_metrics,
                 model_signal=model_signal,
                 historical_signal=historical_signal,
+                novelty_signal=novelty_signal,
                 count_threshold=settings.error_security_threshold,
                 attack_score_threshold=settings.attack_score_threshold,
             )
@@ -916,12 +735,17 @@ def run_rebuild_windows_from_raw(
                 history_rows=history_rows,
                 min_history_rows=max(20, settings.model_min_training_rows),
             )
+            novelty_signal = score_novelty_pattern(
+                current_metrics=window_metrics,
+                history_rows=history_rows,
+            )
             model_signal = unavailable_model_signal("raw_rebuild_model_skipped")
             raw_alerts, risk_summary = evaluate_window_risk(
                 normalized_records=window_records,
                 metrics=window_metrics,
                 model_signal=model_signal,
                 historical_signal=historical_signal,
+                novelty_signal=novelty_signal,
                 count_threshold=settings.error_security_threshold,
                 attack_score_threshold=settings.attack_score_threshold,
             )
@@ -1020,42 +844,6 @@ def run_resync_fallback(_: None = Depends(_require_admin_token)) -> Dict[str, An
         logger.exception("Fallback resync failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
 
-
-@app.post("/run/retrain")
-def run_retrain(_: None = Depends(_require_admin_token)) -> Dict[str, Any]:
-    try:
-        result = _run_retrain_job(trigger="manual_api", raise_on_error=True)
-        return {
-            "status": "ok",
-            "message": "Retrain executed",
-            "result": result,
-            "retrain": _build_retrain_status(),
-        }
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@app.get("/status/retrain")
-def retrain_status() -> Dict[str, Any]:
-    return {
-        "status": "ok",
-        "retrain": _build_retrain_status(),
-    }
-
-
-@app.get("/metrics")
-def metrics() -> Response:
-    """Prometheus metrics endpoint. Falls back to 204 if metrics not available."""
-    try:
-        if not METRICS_AVAILABLE or PROM_REGISTRY is None:
-            return Response(status_code=204)
-        from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
-
-        payload = generate_latest(PROM_REGISTRY)
-        return Response(content=payload, media_type=CONTENT_TYPE_LATEST)
-    except Exception:
-        return Response(status_code=500)
-
 if router and Command:
     @router.message(Command("last_status"))
     async def last_status_telegram(message: Message) -> None:
@@ -1136,13 +924,13 @@ def admin_cleanup(
 
 async def run() -> None:
     import uvicorn
+    from backend.telegram import run_bot 
 
     config = uvicorn.Config(app, host=settings.app_host, port=settings.app_port, reload=False)
     server = uvicorn.Server(config)
 
     tasks = [server.serve()]
-    if dp is not None and bot is not None:
-        tasks.append(dp.start_polling(bot))
+    tasks.append(run_bot())
     await asyncio.gather(*tasks)
 
 

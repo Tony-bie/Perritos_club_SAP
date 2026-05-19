@@ -88,6 +88,7 @@ El sistema combina tres capas:
 | Capa | Fuente | Sirve para |
 |------|--------|------------|
 | Reglas actuales | ventana actual | Detectar correlaciones fuertes aunque no haya historial |
+| Novedad | ventana actual + ventanas recientes | Marcar valores nunca vistos antes |
 | Línea base histórica | `WINDOW_METRICS` | Comparar contra comportamiento normal reciente |
 | Modelo HANA ML | `WINDOW_FEATURES` | Puntaje ML cuando hay suficientes features limpias |
 
@@ -100,6 +101,12 @@ Pueden disparar alertas aún con historial insuficiente. Ejemplos:
 - `SECURITY_SINGLE_IP_PRESSURE`
 - `SECURITY_LLM_DISRUPTION_CORRELATION`
 
+**Novedad**
+
+Marca valores nunca vistos antes como `novel_activity`. Aplica a tipos de log, servicios, códigos HTTP y modelos LLM observados en la ventana actual.
+
+La novedad no predice ataque por sí sola. Significa: "esto apareció por primera vez o no estaba en las ventanas recientes", por lo que merece revisión aunque el modelo histórico aún esté en calibración.
+
 **Línea base histórica**
 
 Usa `WINDOW_METRICS`, no `WINDOW_FEATURES`. Esto es intencional: la línea base necesita ver el historial operativo completo, incluso ventanas con degradación LLM o sistema.
@@ -111,26 +118,32 @@ Usa `WINDOW_FEATURES`, que excluye algunas ventanas claramente anómalas o incom
 **Archivos**
 
 - `historical_baseline.py`: z-score robusto contra historial.
+- `novelty.py`: primeros valores observados contra ventanas recientes.
 - `model.py`: scoring con HANA ML/PAL cuando hay HANA disponible.
 - `detect.py`: combina línea base, modelo y reglas.
 - `alert.py`: formatea eventos y decide notificaciones.
 
 ---
 
-## Qué Significa "Historial Insuficiente"
+## Qué Significa "Historial en Calibración"
 
-Cuando `/history/status` dice que falta historial, significa:
+Cuando `/history/status` muestra historial/modelo en `warming_up`, significa:
 
-- La línea base todavía no tiene suficientes ventanas en `WINDOW_METRICS`.
-- El modelo puede no tener suficientes filas limpias en `WINDOW_FEATURES`.
-- Las reglas actuales siguen funcionando.
+- La detección está activa.
+- Las reglas actuales siguen evaluando cada ventana ingerida.
+- La línea base todavía está calibrándose con ventanas en `WINDOW_METRICS`.
+- El modelo ML puede estar calibrándose con filas limpias en `WINDOW_FEATURES`.
 
 Ejemplo:
 
 ```json
 {
+  "detection_active": true,
+  "training_required_for_detection": false,
+  "baseline_signal_status": "warming_up",
   "historical_rows": 3,
-  "historical_min_required": 20,
+  "historical_recommended_rows": 20,
+  "historical_rows_to_calibration": 17,
   "historical_source_table": "window_metrics",
   "model_rows": 11,
   "model_source_table": "window_features"
@@ -141,6 +154,7 @@ Interpretación:
 
 - `historical_rows`: ventanas disponibles para comparar comportamiento normal.
 - `model_rows`: ventanas limpias disponibles para ML.
+- `*_rows_to_calibration` no es una activación pendiente; es una meta recomendada para mejorar baseline/ML.
 - Si `historical_rows` es bajo pero hay `SECURITY_ERROR_CORRELATION`, el sistema sí vio una correlación fuerte; solo no puede afirmar aún que sea raro respecto a la línea base.
 
 ---

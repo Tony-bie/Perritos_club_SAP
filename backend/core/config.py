@@ -99,6 +99,8 @@ class Settings:
     request_timeout_seconds: int
     max_retries: int
     retry_backoff_seconds: int
+    sap_soc_min_request_interval_seconds: float
+    sap_soc_max_retry_after_seconds: int
     storage_backend: str
     sqlite_path: str
     feedback_db: str
@@ -283,7 +285,7 @@ def _resolve_storage_backend() -> str:
     if configured:
         return configured
 
-    has_hana = bool(_get_hana_value("HANA_HOST", "SAP_HANA_HOST", default=""))
+    has_hana = bool(_get_hana_value("HANA_HOST", "SAP_HANA_HOST", "DB_HOST", default=""))
     return "hana" if has_hana else "sqlite"
 
 
@@ -318,6 +320,14 @@ def load_settings() -> Settings:
         ),
         max_retries=_to_int(os.getenv("MAX_RETRIES"), 3),
         retry_backoff_seconds=_to_int(os.getenv("RETRY_BACKOFF_SECONDS"), 2),
+        sap_soc_min_request_interval_seconds=max(
+            0.0,
+            _to_float(_getenv("SAP_SOC_MIN_REQUEST_INTERVAL_SECONDS", default="1.0"), 1.0),
+        ),
+        sap_soc_max_retry_after_seconds=max(
+            1,
+            _to_int(_getenv("SAP_SOC_MAX_RETRY_AFTER_SECONDS", default="300"), 300),
+        ),
         storage_backend=_resolve_storage_backend(),
         sqlite_path=_getenv("SQLITE_PATH", default="./pipeline.db"),
         feedback_db=_getenv("FEEDBACK_DB", default=FEEDBACK_DB),
