@@ -215,6 +215,16 @@ El prompt obliga al modelo a responder en español, usar solo ese contexto, menc
 
 Si `LLM_ENABLED=false`, falta `LLM_PROVIDER_MODEL`, LiteLLM no está instalado o el proveedor falla, el bot no se rompe: responde con un resumen local basado en el mismo contexto y marca `Fuente: fallback`.
 
+Comandos disponibles:
+
+- `/health` — estado del sistema
+- `/last_status` — último ciclo de ingesta
+- `/alerts_recent [n]` — últimas N alertas (default 3)
+- `/metrics_windows [n]` — últimas N ventanas de métricas (default 3)
+- `/runs_recent [n]` — últimas N ingestas (default 3)
+- `/dashboard [h]` — resumen de las últimas H horas (default 24)
+- `/ask <pregunta>` — análisis con LLM en lenguaje natural
+
 Variables principales:
 
 ```text

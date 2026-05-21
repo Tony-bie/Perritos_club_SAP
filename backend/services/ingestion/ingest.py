@@ -1,3 +1,9 @@
+"""
+Fetches all log pages from the SAP SOC API for the current window.
+
+Returns an IngestRunResult with timing/counts and the raw records list.
+On error, returns status="failed" with empty records so the pipeline continues.
+"""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass

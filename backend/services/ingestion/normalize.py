@@ -1,3 +1,9 @@
+"""
+Classifies raw log records as system logs or LLM logs.
+
+Adds is_system_log and is_llm_log flags based on sap_function_log_type.
+LLM types: LLM_REQUEST, LLM_ERROR, LLM_TIMEOUT. Everything else is system.
+"""
 from __future__ import annotations
 
 from datetime import datetime, timezone

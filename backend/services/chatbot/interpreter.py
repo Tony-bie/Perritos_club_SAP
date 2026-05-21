@@ -1,3 +1,10 @@
+"""
+Generates chatbot responses using LiteLLM (Groq, Gemini, local models, etc.).
+
+If the LLM is disabled, missing, or fails, it falls back to a plain text
+summary built from the context — no exceptions raised.
+Main function: generate_chatbot_response()
+"""
 from __future__ import annotations
 
 import json

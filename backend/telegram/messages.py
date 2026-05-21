@@ -1,3 +1,11 @@
+"""
+Telegram bot handlers (Aiogram 3, long-polling).
+
+Each command calls the matching API function and sends the result as HTML.
+Responses over 3900 chars are split into multiple messages automatically.
+Commands: /health, /last_status, /alerts_recent, /metrics_windows,
+          /runs_recent, /dashboard, /ask, and free-text LLM queries.
+"""
 from backend.core.config import load_settings
 
 from html import escape

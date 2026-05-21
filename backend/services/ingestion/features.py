@@ -1,3 +1,10 @@
+"""
+Groups log records into 30-minute windows and computes ~25 metrics per window.
+
+Metrics include error/security counts, LLM latency, HTTP codes, unique IPs,
+and rate calculations. NUMERIC_FEATURE_COLUMNS lists all features used by
+the ML model and the historical baseline.
+"""
 from __future__ import annotations
 
 from collections import Counter

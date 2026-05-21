@@ -1,3 +1,10 @@
+"""
+HTTP client for the SAP SOC API with retry and auth support.
+
+Handles Bearer token auth, pagination, and exponential backoff.
+401/422 raise immediately. 503 retries up to max_retries times.
+Main method: fetch_current_window_all_pages() to get all logs at once.
+"""
 from __future__ import annotations
 
 import time

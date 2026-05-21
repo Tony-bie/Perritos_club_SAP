@@ -1,3 +1,10 @@
+"""
+Risk scoring for each 30-minute window.
+
+Combines three signals — correlation rules, historical baseline, and the
+HANA ML model — into a single threat_score (0-100) and risk_level.
+Main function: evaluate_window_risk()
+"""
 from __future__ import annotations
 
 from typing import Any, Dict, List

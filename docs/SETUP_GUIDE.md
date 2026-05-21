@@ -222,9 +222,13 @@ Ejemplos de `LLM_PROVIDER_MODEL`:
 
 Comandos del bot:
 
-- `/health`
-- `/last_status`
-- `/ask qué está pasando con los registros?`
+- `/health` — estado del sistema
+- `/last_status` — último ciclo de ingesta
+- `/alerts_recent [n]` — últimas N alertas (default 3)
+- `/metrics_windows [n]` — últimas N ventanas de métricas (default 3)
+- `/runs_recent [n]` — últimas N ingestas (default 3)
+- `/dashboard [h]` — resumen de las últimas H horas (default 24)
+- `/ask <pregunta>` — análisis con LLM en lenguaje natural
 
 El chatbot arma contexto con instantáneas de rutas útiles como `/health`, `/history/status`, `/status/latest`, `/dashboard/summary`, `/alerts/recent`, `/metrics/windows`, `/runs/recent` y `/health/sap`.
 
@@ -260,13 +264,19 @@ curl http://localhost:8000/status/latest
 Todas las pruebas:
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py" -v
+python -m pytest tests/ -q
+```
+
+Con reporte de cobertura (81% global):
+
+```bash
+python -m pytest tests/ --cov=backend --cov-report=term
 ```
 
 Pruebas enfocadas:
 
 ```bash
-python -m unittest tests.test_features tests.test_detection tests.test_store_fallback
+python -m pytest tests/test_detection.py tests/test_features.py tests/test_telegram_messages.py -v
 ```
 
 Validación de sintaxis:

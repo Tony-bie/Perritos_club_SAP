@@ -1,3 +1,10 @@
+"""
+Detects anomalies by comparing the current window against past history.
+
+Uses a robust Z-score (median + MAD) so that old anomalies in the history
+don't distort the baseline. Needs at least 30 stored windows to work.
+Main function: score_historical_pattern()
+"""
 from __future__ import annotations
 
 from statistics import median

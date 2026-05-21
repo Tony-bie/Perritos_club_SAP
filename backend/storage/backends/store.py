@@ -1,3 +1,13 @@
+"""
+Storage backends for the SAP SOC pipeline.
+
+SqliteStore    – local SQLite, used in dev and as fallback.
+HanaStore      – SAP HANA Cloud via hdbcli.
+ResilientStore – wraps both: writes go to HANA, fall back to SQLite on error,
+                 and sync back to HANA automatically when it recovers.
+
+Use create_store(settings) to get the right backend automatically.
+"""
 from __future__ import annotations
 
 import hashlib

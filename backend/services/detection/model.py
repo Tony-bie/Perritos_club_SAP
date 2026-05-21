@@ -1,3 +1,10 @@
+"""
+Runs an ML anomaly model (Isolation Forest or KMeans) on SAP HANA ML.
+
+Only works when STORAGE_BACKEND=hana. Returns a safe "unavailable" signal
+when HANA or hana_ml is not available, so callers don't need to handle errors.
+Main function: score_window_metrics()
+"""
 from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple

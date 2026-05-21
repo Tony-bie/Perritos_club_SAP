@@ -1,3 +1,9 @@
+"""
+Loads all settings from environment variables into a Settings dataclass.
+
+Also reads .env files locally and VCAP_SERVICES on Cloud Foundry.
+Use: from backend.core.config import load_settings; settings = load_settings()
+"""
 import json
 import os
 from dataclasses import dataclass

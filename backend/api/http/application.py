@@ -1,3 +1,9 @@
+"""
+Main FastAPI app for the SAP SOC backend.
+
+Runs the REST API, the background ingestion worker, and the Telegram
+chatbot handler. See README.md for the full list of endpoints.
+"""
 from __future__ import annotations
 
 import logging

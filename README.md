@@ -141,20 +141,33 @@ backend/
 ├── services/
 │   ├── ingestion/                # Normalización, ventanas, features
 │   ├── detection/                # Línea base, modelo, reglas, alertas
+│   ├── chatbot/interpreter.py    # Respuestas LLM con LiteLLM
 │   └── clients/sap_soc.py        # Cliente SAP SOC
-└── storage/backends/store.py     # HANA, SQLite fallback y ResilientStore
+├── storage/backends/store.py     # HANA, SQLite fallback y ResilientStore
+└── telegram/messages.py          # Handlers del bot de Telegram
 
 docs/
 ├── ARCHITECTURE.md
 ├── SETUP_GUIDE.md
 └── INDEX.md
 
-tests/
-├── test_features.py
+tests/                            # 398 tests, 81% cobertura global
 ├── test_detection.py
+├── test_detection_extended.py
+├── test_features.py
+├── test_features_extended.py
+├── test_telegram_messages.py
+├── test_store_sqlite.py
+├── test_application_extended.py
+├── test_interpreter.py
+├── test_alert_formatting.py
+├── test_sap_soc_client.py
+├── test_historical_baseline.py
+├── test_model_helpers.py
+├── test_ingest.py
+├── test_config_extended.py
 ├── test_store_fallback.py
-├── test_block_c_api.py
-└── test_block_c_hana_integration.py
+└── test_block_c_api.py
 ```
 
 ## Almacenamiento
@@ -182,13 +195,19 @@ Con `STORAGE_BACKEND=hana`, el sistema usa SQLite como fallback/respaldo resilie
 ## Pruebas
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py" -v
+python -m pytest tests/ -q
+```
+
+Con reporte de cobertura:
+
+```bash
+python -m pytest tests/ --cov=backend --cov-report=term
 ```
 
 Pruebas enfocadas:
 
 ```bash
-python -m unittest tests.test_features tests.test_detection tests.test_store_fallback
+python -m pytest tests/test_detection.py tests/test_features.py -v
 ```
 
 ## Preguntas Rápidas

@@ -1,3 +1,9 @@
+"""
+Formats alerts and decides when to send them to SAP SOC.
+
+Key functions: format_alert_events, build_alert_submission_message,
+should_submit_alert_notification.
+"""
 from __future__ import annotations
 
 from datetime import datetime, timezone
