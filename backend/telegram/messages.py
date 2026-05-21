@@ -98,16 +98,21 @@ def _build_window_block(i: int, window: Dict[str, Any]) -> str:
 
 
 async def _send_chunked_html_messages(chat_id: int, header: str, blocks: list) -> None:
+    import asyncio
     if bot is None:
         return
     max_length = 3900
     current = header.strip()
+    sent_count = 0
     for block in blocks:
         if len(block) > max_length:
             block = block[:max_length - 20] + "\n<i>…truncado</i>"
         candidate = f"{current}\n\n{block}" if current else block
         if len(candidate) > max_length and current:
             await bot.send_message(chat_id=chat_id, text=current, parse_mode="HTML")
+            sent_count += 1
+            if sent_count > 1:
+                await asyncio.sleep(0.5)
             current = block
         else:
             current = candidate
