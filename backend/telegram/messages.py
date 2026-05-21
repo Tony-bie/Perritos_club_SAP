@@ -49,6 +49,72 @@ if dp and router:
     dp.include_router(router)
 
 
+def _build_window_block(i: int, window: Dict[str, Any]) -> str:
+    w_start = (window.get("window_start", "") or "")[:19].replace("T", " ")
+    w_end   = (window.get("window_end",   "") or "")[:19].replace("T", " ")
+
+    total  = window.get("total_records", 0) or 0
+    sys_c  = window.get("system_log_count", 0) or 0
+    llm_c  = window.get("llm_log_count", 0) or 0
+    err_c  = window.get("error_count", 0) or 0
+    sec_c  = window.get("security_count", 0) or 0
+    warn_c = window.get("warning_count", 0) or 0
+    ips    = window.get("unique_client_ips", 0) or 0
+    svcs   = window.get("unique_services", 0) or 0
+    http4  = window.get("http_4xx_count", 0) or 0
+    http5  = window.get("http_5xx_count", 0) or 0
+
+    llm_req   = window.get("llm_request_count", 0) or 0
+    llm_err_r = round(float(window.get("llm_error_rate", 0) or 0) * 100, 1)
+    llm_to_r  = round(float(window.get("llm_timeout_rate", 0) or 0) * 100, 1)
+    avg_lat   = round(float(window.get("avg_llm_latency_ms", 0) or 0))
+    p95_lat   = round(float(window.get("p95_llm_latency_ms", 0) or 0))
+    cost      = round(float(window.get("total_llm_cost_usd", 0) or 0), 4)
+
+    risk       = (window.get("risk_level", "N/A") or "N/A").upper()
+    threat     = window.get("threat_score", "N/A")
+    is_anomaly = window.get("is_anomaly", False)
+    reason     = escape(str(window.get("anomaly_reason", "N/A") or "N/A"))
+
+    risk_icon = {"SUSPICIOUS": "⚠️", "HIGH": "🔴", "LOW": "🟢", "MEDIUM": "🟡"}.get(risk, "ℹ️")
+
+    lines = [
+        f"<b>Ventana #{i}</b>  <code>{w_start} → {w_end} UTC</code>",
+        f"{risk_icon} <b>{risk}</b>  |  Score: <b>{threat}</b>  |  Anomalía: <b>{'Sí' if is_anomaly else 'No'}</b>",
+        f"  ↳ {reason}",
+        "",
+        f"📦 <b>Volumen</b>",
+        f"  • Total: <b>{total:,}</b>  |  IPs: <b>{ips}</b>  |  Servicios: <b>{svcs}</b>",
+        f"  • Sistema: <b>{sys_c}</b>  |  LLM: <b>{llm_c}</b>",
+        f"  • Errores: <b>{err_c}</b>  |  Seguridad: <b>{sec_c}</b>  |  Warnings: <b>{warn_c}</b>",
+        f"  • HTTP 4xx: <b>{http4}</b>  |  5xx: <b>{http5}</b>",
+        "",
+        f"🤖 <b>LLM</b>",
+        f"  • Req: <b>{llm_req:,}</b>  |  Err: <b>{llm_err_r}%</b>  |  Timeout: <b>{llm_to_r}%</b>",
+        f"  • Latencia avg: <b>{avg_lat:,} ms</b>  |  p95: <b>{p95_lat:,} ms</b>",
+        f"  • Costo: <b>${cost}</b>",
+    ]
+    return "\n".join(lines)
+
+
+async def _send_chunked_html_messages(chat_id: int, header: str, blocks: list) -> None:
+    if bot is None:
+        return
+    max_length = 3900
+    current = header.strip()
+    for block in blocks:
+        if len(block) > max_length:
+            block = block[:max_length - 20] + "\n<i>…truncado</i>"
+        candidate = f"{current}\n\n{block}" if current else block
+        if len(candidate) > max_length and current:
+            await bot.send_message(chat_id=chat_id, text=current, parse_mode="HTML")
+            current = block
+        else:
+            current = candidate
+    if current:
+        await bot.send_message(chat_id=chat_id, text=current, parse_mode="HTML")
+
+
 # Messages
 
 if router and Command:
@@ -148,7 +214,7 @@ if router and Command:
 
 if router and Command:
     @router.message(Command("metrics_windows"))
-    async def alert_recent_telegram(message: Message):
+    async def metrics_windows_telegram(message: Message):
         from backend.api.http import metrics_windows
         if bot is None:
             await message.answer("Telegram bot no esta configurado en este entorno.")
@@ -157,36 +223,18 @@ if router and Command:
             args = message.text.split()
             limit = int(args[1]) if len(args) >= 2 and args[1].isdigit() else 3
             result = metrics_windows(limit=limit)
-            
-            await bot.send_message(
-                chat_id=message.chat.id,
-                text=f"<b>Metricas por ventana: {limit} ventanas</b>\n",
-                parse_mode="HTML"
-            )
-            for i, window in enumerate(result, 1):
-                lineas = []
-                for key, value in window.items():
+            windows = result if isinstance(result, list) else []
+            blocks = [_build_window_block(i, w) for i, w in enumerate(windows, 1) if isinstance(w, dict)]
 
-                    key_fmt = key.replace('_', ' ').capitalize()
-                    if isinstance(value, str) and 'T' in value:
-                        value_fmt = value[:19].replace('T', ' ')  
-                    elif isinstance(value, float):
-                        value_fmt = round(value, 4)             
-                    elif value is None:
-                        value_fmt = 'N/A'
-                    else:
-                        value_fmt = value 
-                    lineas.append(f"  • <b>{key_fmt}:</b> {value_fmt}")
+            newest = windows[0] if windows else {}
+            oldest = windows[-1] if windows else {}
+            r_start = (oldest.get("window_start", "") or "")[:19].replace("T", " ")
+            r_end   = (newest.get("window_end",   "") or "")[:19].replace("T", " ")
+            header = f"<b>Métricas por ventana: {len(windows)} ventanas</b>\n<b>Rango:</b> {r_start} → {r_end} UTC"
 
-                lineas.append("")  
-
-                await bot.send_message(
-                    chat_id=message.chat.id,
-                    text="\n".join(lineas),
-                    parse_mode="HTML"
-                )
+            await _send_chunked_html_messages(chat_id=message.chat.id, header=header, blocks=blocks)
         except Exception as exc:
-            await bot.send_message(chat_id=message.chat.id, text=f"Error: Pon un rango correcto")
+            await bot.send_message(chat_id=message.chat.id, text=f"❌ Error: {escape(str(exc))}", parse_mode="HTML")
 
 if router and Command:
     @router.message(Command("runs_recent"))
